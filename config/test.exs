@@ -22,6 +22,14 @@ config :logger, level: :warning
 
 config :wajadi_engine, :whatsapp_restore_active_sessions, false
 
+config :wajadi_engine, :whatsapp_session_start_opts,
+  amarula_config: %{
+    offline: true,
+    connection_state: :connected,
+    storage:
+      {Amarula.Storage.File, root: Path.join(System.tmp_dir!(), "wajadi_engine_amarula_test")}
+  }
+
 config :phoenix, :plug_init_mode, :runtime
 
 config :phoenix,

@@ -7,6 +7,19 @@ defmodule WajadiEngineWeb.Router do
 
   scope "/api", WajadiEngineWeb do
     pipe_through :api
+
+    scope "/whatsapp" do
+      get "/account/:user_id/list", WhatsAppController, :list
+      post "/account/:user_id/create", WhatsAppController, :create
+      get "/account/:user_id/qr/:session_id/view", WhatsAppController, :get_qr
+      get "/account/:user_id/qr/:session_id/refresh", WhatsAppController, :refresh_qr
+      patch "/account/:user_id/connect/:session_id", WhatsAppController, :connect
+      patch "/account/:user_id/disconnect/:session_id", WhatsAppController, :disconnect
+      patch "/account/:user_id/pause/:session_id", WhatsAppController, :pause
+      patch "/account/:user_id/resume/:session_id", WhatsAppController, :resume
+      delete "/account/:user_id/logout/:session_id", WhatsAppController, :logout
+      delete "/account/:user_id/delete/:session_id", WhatsAppController, :delete
+    end
   end
 
   # Enable LiveDashboard

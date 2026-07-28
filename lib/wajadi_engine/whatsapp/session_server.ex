@@ -238,12 +238,11 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
 
   defp start_or_adopt_amarula(state) do
     config =
-      state.amarula_config
-      |> Map.new()
-      |> Map.merge(%{
+      %{
         profile: state.session_id,
         storage: {WajadiEngine.WhatsApp.Storage.Postgres, []}
-      })
+      }
+      |> Map.merge(Map.new(state.amarula_config))
 
     config
     |> Amarula.new()
