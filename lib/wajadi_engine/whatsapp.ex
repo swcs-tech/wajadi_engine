@@ -11,6 +11,12 @@ defmodule WajadiEngine.WhatsApp do
   alias WajadiEngine.WhatsApp.Session
 
   @type session_result :: {:ok, Session.t()} | {:error, Ecto.Changeset.t() | :not_found}
+  @type auth_state_metadata :: %{
+          type: String.t(),
+          key: String.t(),
+          encoding: AuthState.encoding(),
+          updated_at: DateTime.t()
+        }
 
   @spec generate_session_id(String.t()) :: String.t()
   def generate_session_id(user_id) when is_binary(user_id) do
@@ -162,6 +168,20 @@ defmodule WajadiEngine.WhatsApp do
       |> Repo.delete_all()
 
     count
+  end
+
+  @spec list_auth_state_metadata(String.t()) :: [auth_state_metadata()]
+  def list_auth_state_metadata(session_id) when is_binary(session_id) do
+    AuthState
+    |> where([auth_state], auth_state.session_id == ^session_id)
+    |> order_by([auth_state], asc: auth_state.type, asc: auth_state.key)
+    |> select([auth_state], %{
+      type: auth_state.type,
+      key: auth_state.key,
+      encoding: auth_state.encoding,
+      updated_at: auth_state.updated_at
+    })
+    |> Repo.all()
   end
 
   @spec count_chat_histories(String.t()) :: non_neg_integer()

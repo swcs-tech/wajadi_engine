@@ -9,6 +9,7 @@ defmodule WajadiEngine.Application do
       WajadiEngineWeb.Telemetry,
       WajadiEngine.Repo,
       Amarula.Supervisor,
+      {Task.Supervisor, name: WajadiEngine.TaskSupervisor},
       {Registry, keys: :unique, name: WajadiEngine.WhatsApp.SessionRegistry},
       WajadiEngine.WhatsApp.SessionSupervisor,
       WajadiEngine.WhatsApp.SessionRestorer,

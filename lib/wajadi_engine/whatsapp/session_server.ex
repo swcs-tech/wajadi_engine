@@ -8,6 +8,7 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
   require Logger
 
   alias Amarula.Address
+  alias WajadiEngine.AI.Agent
   alias WajadiEngine.WhatsApp
   alias WajadiEngine.WhatsApp.Helpers
 
@@ -18,7 +19,9 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
     :session_id,
     :conn_pid,
     :conn_monitor,
+    :ai_agent,
     connect_on_init?: true,
+    ai_async?: true,
     amarula_config: %{}
   ]
 
@@ -69,6 +72,13 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
     GenServer.call(server, {:send_reply, jid, text, opts}, 30_000)
   end
 
+  @spec send_media(server(), String.t(), Amarula.media_type(), binary(), keyword()) ::
+          Amarula.send_result()
+  def send_media(server, jid, type, data, opts \\ [])
+      when is_binary(jid) and is_binary(data) do
+    GenServer.call(server, {:send_media, jid, type, data, opts}, 30_000)
+  end
+
   @impl true
   def init(opts) do
     user_id = Keyword.fetch!(opts, :user_id)
@@ -78,8 +88,15 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
       user_id: user_id,
       session_id: session_id,
       connect_on_init?: Keyword.get(opts, :connect, true),
+      ai_agent: Keyword.get(opts, :ai_agent, Agent),
+      ai_async?: Keyword.get(opts, :ai_async?, true),
       amarula_config: Keyword.get(opts, :amarula_config, %{})
     }
+
+    Logger.info("WhatsApp session runtime started",
+      session_id: state.session_id,
+      connect_on_init: state.connect_on_init?
+    )
 
     if state.connect_on_init? do
       {:ok, state, {:continue, :connect}}
@@ -118,12 +135,12 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
   end
 
   def handle_call(:pause, _from, state) do
-    reply_session_update(state, &WhatsApp.pause_session/1)
+    reply_session_update(state, &WhatsApp.pause_session/1, "WhatsApp session paused")
   end
 
   def handle_call(:resume, _from, state) do
     if connected_connection?(state) do
-      reply_session_update(state, &WhatsApp.resume_session/1)
+      reply_session_update(state, &WhatsApp.resume_session/1, "WhatsApp session resumed")
     else
       {:reply, {:error, :not_connected}, state}
     end
@@ -131,11 +148,19 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
 
   def handle_call(:logout, _from, state) do
     state = logout_amarula(state)
-    WhatsApp.clear_auth_states(state.session_id)
+    auth_rows_cleared = WhatsApp.clear_auth_states(state.session_id)
 
     case fetch_and_update_session(state, &WhatsApp.mark_session_disconnected/1) do
-      {:ok, session} -> {:reply, {:ok, session}, clear_connection_state(state)}
-      {:error, reason} -> {:reply, {:error, reason}, clear_connection_state(state)}
+      {:ok, session} ->
+        Logger.info("WhatsApp session logged out",
+          session_id: state.session_id,
+          auth_rows_cleared: auth_rows_cleared
+        )
+
+        {:reply, {:ok, session}, clear_connection_state(state)}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, clear_connection_state(state)}
     end
   end
 
@@ -154,11 +179,27 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
 
   def handle_call({:send_reply, jid, text, opts}, _from, state) do
     {save_history?, send_opts} = Keyword.pop(opts, :save_history, true)
-
     result = send_text_result(state, jid, text, send_opts)
 
     if save_history? do
       log_outgoing_message(state, jid, text, "text", result)
+    end
+
+    {:reply, result, state}
+  end
+
+  def handle_call({:send_media, jid, type, data, opts}, _from, state) do
+    {save_history?, send_opts} = Keyword.pop(opts, :save_history, true)
+    result = send_media_result(state, jid, type, data, send_opts)
+
+    if save_history? do
+      log_outgoing_message(
+        state,
+        jid,
+        media_log_body(type, send_opts),
+        Atom.to_string(type),
+        result
+      )
     end
 
     {:reply, result, state}
@@ -189,7 +230,7 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
 
   def handle_info({:amarula, :messages_upsert, %{messages: messages}}, state)
       when is_list(messages) do
-    Enum.each(messages, &log_incoming_message(state, &1))
+    Enum.each(messages, &handle_incoming_message(state, &1))
 
     {:noreply, state}
   end
@@ -197,7 +238,7 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
   def handle_info({:amarula, :error, reason}, state) do
     Logger.warning("WhatsApp connection error",
       session_id: state.session_id,
-      reason: inspect(reason)
+      reason: safe_reason(reason)
     )
 
     {:noreply, state}
@@ -214,7 +255,7 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
       ) do
     Logger.warning("WhatsApp connection process down",
       session_id: state.session_id,
-      reason: inspect(reason)
+      reason: safe_reason(reason)
     )
 
     {:noreply, %{state | conn_pid: nil, conn_monitor: nil}}
@@ -223,7 +264,7 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
   def handle_info(message, state) do
     Logger.debug("Ignored SessionServer message",
       session_id: state.session_id,
-      message: inspect(elem_tuple(message, 0))
+      message: message_kind(message)
     )
 
     {:noreply, state}
@@ -239,6 +280,7 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
     with {:ok, session} <- WhatsApp.fetch_session_for_user(state.user_id, state.session_id),
          {:ok, _session} <- WhatsApp.mark_session_connecting(session),
          {:ok, pid} <- start_or_adopt_amarula(state) do
+      Logger.info("WhatsApp session connection started", session_id: state.session_id)
       {:ok, pid, monitor_connection(%{state | conn_pid: pid})}
     else
       {:error, reason} -> {:error, reason, state}
@@ -310,7 +352,7 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
         {:error, reason} ->
           Logger.warning("WhatsApp credential wipe failed",
             session_id: state.session_id,
-            reason: inspect(reason)
+            reason: safe_reason(reason)
           )
       end
     end
@@ -335,7 +377,10 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
         :ok
 
       {:error, reason} ->
-        Logger.warning("WhatsApp stop failed", session_id: session_id, reason: inspect(reason))
+        Logger.warning("WhatsApp stop failed",
+          session_id: session_id,
+          reason: safe_reason(reason)
+        )
     end
   end
 
@@ -362,17 +407,38 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
       {:error, :not_connected}
     end
   rescue
-    exception -> {:error, Exception.message(exception)}
+    exception -> {:error, exception.__struct__}
   catch
     :exit, reason -> {:error, reason}
   end
 
-  defp log_incoming_message(_state, %Amarula.Msg{from_me: true}), do: :ok
+  defp send_media_result(state, jid, type, data, opts) do
+    if connected_connection?(state) do
+      Helpers.send_media(Amarula.via(state.session_id), jid, type, data, opts)
+    else
+      {:error, :not_connected}
+    end
+  rescue
+    exception -> {:error, exception.__struct__}
+  catch
+    :exit, reason -> {:error, reason}
+  end
+
+  defp handle_incoming_message(state, %Amarula.Msg{} = message) do
+    case log_incoming_message(state, message) do
+      {:ok, body} -> maybe_start_ai_reply(state, message, body)
+      :skip -> :ok
+    end
+  end
+
+  defp handle_incoming_message(_state, _message), do: :ok
+
+  defp log_incoming_message(_state, %Amarula.Msg{from_me: true}), do: :skip
 
   defp log_incoming_message(state, %Amarula.Msg{} = message) do
     case Helpers.extract_message_content(message) do
       nil ->
-        :ok
+        :skip
 
       body ->
         attrs = %{
@@ -385,19 +451,94 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
 
         case WhatsApp.create_incoming_chat_history(attrs) do
           {:ok, _chat_history} ->
-            :ok
+            {:ok, body}
 
           {:error, reason} ->
             Logger.warning("WhatsApp incoming message log failed",
               session_id: state.session_id,
-              message_id: message.id,
-              reason: inspect(reason)
+              message_id: bounded_id(message.id),
+              reason: safe_reason(reason)
             )
+
+            {:ok, body}
         end
     end
   end
 
-  defp log_incoming_message(_state, _message), do: :ok
+  defp maybe_start_ai_reply(state, message, body) do
+    with {:ok, session} <- WhatsApp.fetch_session_for_user(state.user_id, state.session_id),
+         true <- session.status != "paused",
+         true <- session.status == "connected",
+         true <- connected_connection?(state),
+         {:ok, target_jid} <- reply_target(message) do
+      start_ai_reply(state, target_jid, body)
+    else
+      _skip -> :ok
+    end
+  end
+
+  defp start_ai_reply(%{ai_async?: true} = state, target_jid, body) do
+    case Task.Supervisor.start_child(WajadiEngine.TaskSupervisor, fn ->
+           run_ai_reply(state, target_jid, body)
+         end) do
+      {:ok, _pid} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("WhatsApp AI reply task start failed",
+          session_id: state.session_id,
+          reason: safe_reason(reason)
+        )
+    end
+  end
+
+  defp start_ai_reply(state, target_jid, body), do: run_ai_reply(state, target_jid, body)
+
+  defp run_ai_reply(state, target_jid, body) do
+    send_chatstate_best_effort(state, target_jid, :composing)
+
+    case state.ai_agent.handle_incoming_message(state.session_id, body) do
+      {:ok, reply} when is_binary(reply) and reply != "" ->
+        result = send_text_result(state, target_jid, reply, [])
+        log_outgoing_message(state, target_jid, reply, "text", result)
+
+      {:ok, _empty_reply} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("WhatsApp AI reply failed",
+          session_id: state.session_id,
+          reason: safe_reason(reason)
+        )
+    end
+  rescue
+    exception ->
+      Logger.warning("WhatsApp AI reply crashed",
+        session_id: state.session_id,
+        reason: exception.__struct__
+      )
+  after
+    send_chatstate_best_effort(state, target_jid, :paused)
+  end
+
+  defp reply_target(%Amarula.Msg{} = message) do
+    case Helpers.address_to_jid(message.channel) || Helpers.address_to_jid(message.from) do
+      jid when is_binary(jid) -> {:ok, jid}
+      nil -> {:error, :missing_reply_target}
+    end
+  end
+
+  defp send_chatstate_best_effort(state, jid, type) do
+    if connected_connection?(state) do
+      Amarula.send_chatstate(Amarula.via(state.session_id), jid, type)
+    end
+
+    :ok
+  rescue
+    _exception -> :ok
+  catch
+    :exit, _reason -> :ok
+  end
 
   defp log_outgoing_message(state, jid, body, type, result) do
     attrs = %{
@@ -418,7 +559,7 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
         Logger.warning("WhatsApp outgoing message log failed",
           session_id: state.session_id,
           status: attrs.status,
-          reason: inspect(reason)
+          reason: safe_reason(reason)
         )
     end
   end
@@ -444,12 +585,21 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
   defp outgoing_status({:error, _reason}), do: "failed"
 
   defp outgoing_error({:ok, _result}), do: nil
-  defp outgoing_error({:error, reason}), do: inspect(reason)
+  defp outgoing_error({:error, reason}), do: inspect(safe_reason(reason))
 
-  defp reply_session_update(state, fun) do
+  defp media_log_body(type, opts), do: Keyword.get(opts, :caption) || "[#{type}]"
+
+  defp reply_session_update(state, fun, success_message) do
     case fetch_and_update_session(state, fun) do
-      {:ok, session} -> {:reply, {:ok, session}, state}
-      {:error, reason} -> {:reply, {:error, reason}, state}
+      {:ok, session} ->
+        if success_message do
+          Logger.info(success_message, session_id: state.session_id, status: session.status)
+        end
+
+        {:reply, {:ok, session}, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
@@ -467,7 +617,7 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
       {:error, reason} ->
         Logger.warning("WhatsApp session update failed",
           session_id: state.session_id,
-          reason: inspect(reason)
+          reason: safe_reason(reason)
         )
     end
   end
@@ -475,11 +625,42 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
   defp put_last_connection_error(state, reason) do
     Logger.warning("WhatsApp connection start failed",
       session_id: state.session_id,
-      reason: inspect(reason)
+      reason: safe_reason(reason)
     )
 
     state
   end
+
+  defp bounded_id(id) when is_binary(id), do: String.slice(id, 0, 128)
+  defp bounded_id(_id), do: nil
+
+  defp message_kind(message) when is_atom(message), do: message
+
+  defp message_kind(message) when is_tuple(message) and tuple_size(message) > 0 do
+    case elem(message, 0) do
+      tag when is_atom(tag) -> tag
+      _other -> :tuple
+    end
+  end
+
+  defp message_kind(message) when is_map(message), do: :map
+  defp message_kind(message) when is_binary(message), do: :binary
+  defp message_kind(_message), do: :unknown
+
+  defp safe_reason(%Ecto.Changeset{}), do: :changeset_invalid
+  defp safe_reason(%module{}) when is_atom(module), do: module
+  defp safe_reason(reason) when is_atom(reason), do: reason
+  defp safe_reason(reason) when is_binary(reason), do: :binary_reason
+
+  defp safe_reason(reason) when is_tuple(reason) and tuple_size(reason) > 0 do
+    case elem(reason, 0) do
+      tag when is_atom(tag) -> tag
+      _other -> :tuple_reason
+    end
+  end
+
+  defp safe_reason(reason) when is_list(reason), do: :list_reason
+  defp safe_reason(_reason), do: :unknown_reason
 
   defp phone_number_from(%{phone_number: phone_number}) when is_binary(phone_number),
     do: phone_number
@@ -522,10 +703,4 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
     |> String.split(":", parts: 2)
     |> hd()
   end
-
-  defp elem_tuple(tuple, index) when is_tuple(tuple) and tuple_size(tuple) > index do
-    elem(tuple, index)
-  end
-
-  defp elem_tuple(message, _index), do: message
 end

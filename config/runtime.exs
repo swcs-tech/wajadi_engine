@@ -22,6 +22,11 @@ end
 
 config :wajadi_engine, WajadiEngineWeb.Endpoint, http: [port: env!("PORT", :integer!, 4000)]
 
+config :wajadi_engine, :ai,
+  nine_router_base_url: env!("NINE_ROUTER_BASE_URL", :string!, "http://localhost:20128/v1"),
+  nine_router_api_key: env!("NINE_ROUTER_API_KEY", :string!, "dummy-key"),
+  nine_router_model: env!("NINE_ROUTER_MODEL", :string!, "gpt-4o")
+
 if config_env() == :prod do
   maybe_ipv6 = if env!("ECTO_IPV6", :boolean!, false), do: [:inet6], else: []
 

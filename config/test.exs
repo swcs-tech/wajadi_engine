@@ -30,6 +30,11 @@ config :wajadi_engine, :whatsapp_session_start_opts,
       {Amarula.Storage.File, root: Path.join(System.tmp_dir!(), "wajadi_engine_amarula_test")}
   }
 
+config :wajadi_engine, :ai,
+  nine_router_base_url: "http://localhost:20128/v1",
+  nine_router_api_key: "dummy-key",
+  nine_router_model: "gpt-4o"
+
 config :phoenix, :plug_init_mode, :runtime
 
 config :phoenix,
