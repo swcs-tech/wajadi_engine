@@ -17,7 +17,7 @@ defmodule WajadiEngine.MixProject do
   def application do
     [
       mod: {WajadiEngine.Application, []},
-      extra_applications: [:logger, :runtime_tools]
+      extra_applications: [:logger, :runtime_tools, :os_mon]
     ]
   end
 
@@ -47,6 +47,7 @@ defmodule WajadiEngine.MixProject do
       {:bandit, "~> 1.10"},
       {:amarula, "~> 0.5"},
       {:langchain, "~> 0.9"},
+      {:ecto_psql_extras, "~> 0.8.8"},
       {:ex_slop, "~> 0.1", only: [:dev, :test], runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false}
     ]

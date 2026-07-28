@@ -34,7 +34,21 @@ defmodule WajadiEngineWeb.Router do
     scope "/dev" do
       pipe_through [:fetch_session, :protect_from_forgery]
 
-      live_dashboard "/dashboard", metrics: WajadiEngineWeb.Telemetry
+      live_dashboard "/dashboard",
+        metrics: WajadiEngineWeb.Telemetry,
+        ecto_repos: [WajadiEngine.Repo],
+        ecto_psql_extras_options: [
+          long_running_queries: [threshold: "200 milliseconds"]
+        ]
+    end
+
+    scope "/dev/load", WajadiEngineWeb.Dev do
+      pipe_through :api
+
+      put "/whatsapp/sessions/:user_id/:session_id", LoadWhatsAppController, :upsert_session
+      post "/whatsapp/messages/send", LoadWhatsAppController, :send_message
+      post "/whatsapp/messages/receive", LoadWhatsAppController, :receive_message
+      get "/whatsapp/sessions/:session_id/stats", LoadWhatsAppController, :session_stats
     end
   end
 end

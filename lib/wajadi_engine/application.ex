@@ -5,6 +5,8 @@ defmodule WajadiEngine.Application do
 
   @impl true
   def start(_type, _args) do
+    {:ok, _} = Application.ensure_all_started(:os_mon)
+
     children = [
       WajadiEngineWeb.Telemetry,
       WajadiEngine.Repo,
