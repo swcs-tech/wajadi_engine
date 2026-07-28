@@ -33,6 +33,33 @@ defmodule WajadiEngine.WhatsApp.Storage.PostgresTest do
       assert Repo.aggregate(AuthState, :count) == 1
     end
 
+    test "maps all Amarula namespaces to TS-compatible row identities", %{
+      state: state,
+      profile: profile
+    } do
+      cases = [
+        {:creds, :self, "creds", "creds"},
+        {:session, "user-1", "session", "user-1"},
+        {:sender_key, "group-1", "sender-key", "group-1"},
+        {:app_state_sync_key, "sync-1", "app-state-sync-key", "sync-1"},
+        {:app_state_version, "critical_block", "app-state-version", "critical_block"},
+        {:lid_mapping, "lid-1", "lid-mapping", "lid-1"},
+        {:device_list, "device-1", "device-list", "device-1"}
+      ]
+
+      Enum.each(cases, fn {namespace, key, type, row_key} ->
+        assert :ok =
+                 Postgres.put(state, profile, namespace, key, %{
+                   namespace: Atom.to_string(namespace)
+                 })
+
+        assert %AuthState{type: ^type, key: ^row_key, encoding: "json"} =
+                 Repo.get_by(AuthState, session_id: profile, type: type, key: row_key)
+      end)
+
+      assert Repo.aggregate(AuthState, :count) == length(cases)
+    end
+
     test "delete removes one key and missing rows are misses", %{state: state, profile: profile} do
       assert :ok = Postgres.put(state, profile, :sender_key, "group-1", %{record: "value"})
       assert {:ok, %{record: "value"}} = Postgres.get(state, profile, :sender_key, "group-1")

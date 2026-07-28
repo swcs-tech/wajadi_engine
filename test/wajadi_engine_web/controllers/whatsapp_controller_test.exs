@@ -4,6 +4,34 @@ defmodule WajadiEngineWeb.WhatsAppControllerTest do
   alias WajadiEngine.WhatsApp
   alias WajadiEngine.WhatsApp.SessionSupervisor
 
+  describe "route parity" do
+    test "exposes only the TypeScript-compatible WhatsApp account routes" do
+      whatsapp_routes =
+        WajadiEngineWeb.Router.__routes__()
+        |> Enum.filter(&String.starts_with?(&1.path, "/api/whatsapp"))
+        |> Enum.map(&{&1.verb, &1.path})
+        |> Enum.sort()
+
+      assert whatsapp_routes ==
+               [
+                 {:delete, "/api/whatsapp/account/:user_id/delete/:session_id"},
+                 {:delete, "/api/whatsapp/account/:user_id/logout/:session_id"},
+                 {:get, "/api/whatsapp/account/:user_id/list"},
+                 {:get, "/api/whatsapp/account/:user_id/qr/:session_id/refresh"},
+                 {:get, "/api/whatsapp/account/:user_id/qr/:session_id/view"},
+                 {:patch, "/api/whatsapp/account/:user_id/connect/:session_id"},
+                 {:patch, "/api/whatsapp/account/:user_id/disconnect/:session_id"},
+                 {:patch, "/api/whatsapp/account/:user_id/pause/:session_id"},
+                 {:patch, "/api/whatsapp/account/:user_id/resume/:session_id"},
+                 {:post, "/api/whatsapp/account/:user_id/create"}
+               ]
+
+      refute Enum.any?(whatsapp_routes, fn {_verb, path} ->
+               Regex.match?(~r/(send|message|reply|group|history)/, path)
+             end)
+    end
+  end
+
   describe "GET /api/whatsapp/account/:user_id/list" do
     test "lists sessions scoped by user", %{conn: conn} do
       assert {:ok, session} =

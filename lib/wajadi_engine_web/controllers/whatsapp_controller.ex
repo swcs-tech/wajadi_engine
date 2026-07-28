@@ -55,15 +55,17 @@ defmodule WajadiEngineWeb.WhatsAppController do
   end
 
   def get_qr(conn, %{"user_id" => user_id, "session_id" => session_id}) do
-    with {:ok, session} <- WhatsApp.fetch_session_for_user(user_id, session_id) do
-      render_success(conn, 200, "Session QR and status", %{
-        session_id: session.session_id,
-        status: session.status,
-        qr: session.qr,
-        is_active: session.is_active
-      })
-    else
-      {:error, :not_found} -> render_error(conn, 404, "Session not found", nil)
+    case WhatsApp.fetch_session_for_user(user_id, session_id) do
+      {:ok, session} ->
+        render_success(conn, 200, "Session QR and status", %{
+          session_id: session.session_id,
+          status: session.status,
+          qr: session.qr,
+          is_active: session.is_active
+        })
+
+      {:error, :not_found} ->
+        render_error(conn, 404, "Session not found", nil)
     end
   end
 

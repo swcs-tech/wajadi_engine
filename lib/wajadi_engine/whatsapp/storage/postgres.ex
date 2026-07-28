@@ -30,36 +30,21 @@ defmodule WajadiEngine.WhatsApp.Storage.Postgres do
 
   @impl true
   def get(%{repo: repo}, profile, namespace, key) do
-    with {:ok, type, row_key} <- row_identity(namespace, key) do
-      AuthState
-      |> where(
-        [auth_state],
-        auth_state.session_id == ^profile_id(profile) and auth_state.type == ^type and
-          auth_state.key == ^row_key
-      )
-      |> repo.one()
-      |> case do
-        %AuthState{encoding: encoding, value: value} ->
-          case Codec.decode(encoding, value) do
-            {:ok, decoded} ->
-              {:ok, decoded}
+    case row_identity(namespace, key) do
+      {:ok, type, row_key} ->
+        profile = profile_id(profile)
 
-            {:error, reason} ->
-              Logger.warning("Postgres storage decode failed",
-                session_id: profile_id(profile),
-                type: type,
-                key: row_key,
-                reason: safe_reason(reason)
-              )
+        AuthState
+        |> where(
+          [auth_state],
+          auth_state.session_id == ^profile and auth_state.type == ^type and
+            auth_state.key == ^row_key
+        )
+        |> repo.one()
+        |> decode_row(profile, type, row_key)
 
-              :error
-          end
-
-        nil ->
-          :error
-      end
-    else
-      {:error, _reason} -> :error
+      {:error, _reason} ->
+        :error
     end
   end
 
@@ -166,6 +151,25 @@ defmodule WajadiEngine.WhatsApp.Storage.Postgres do
 
   defp profile_id(profile) when is_binary(profile), do: profile
   defp profile_id(profile) when is_atom(profile), do: Atom.to_string(profile)
+
+  defp decode_row(nil, _profile, _type, _row_key), do: :error
+
+  defp decode_row(%AuthState{encoding: encoding, value: value}, profile, type, row_key) do
+    case Codec.decode(encoding, value) do
+      {:ok, decoded} ->
+        {:ok, decoded}
+
+      {:error, reason} ->
+        Logger.warning("Postgres storage decode failed",
+          session_id: profile,
+          type: type,
+          key: row_key,
+          reason: safe_reason(reason)
+        )
+
+        :error
+    end
+  end
 
   defp safe_reason(reason) when is_atom(reason), do: reason
 

@@ -207,7 +207,7 @@ defmodule WajadiEngine.WhatsApp do
   end
 
   defp session_id_from(attrs) do
-    Map.get(attrs, :session_id) || Map.get(attrs, "session_id")
+    Map.get(attrs, :session_id)
   end
 
   defp normalize_attrs(attrs, fields) do
