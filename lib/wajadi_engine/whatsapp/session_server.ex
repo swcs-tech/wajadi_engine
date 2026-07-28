@@ -7,6 +7,7 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
 
   require Logger
 
+  alias Amarula.Address
   alias WajadiEngine.WhatsApp
 
   @registry WajadiEngine.WhatsApp.SessionRegistry
@@ -106,10 +107,11 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
   end
 
   def handle_call(:disconnect, _from, state) do
-    state = disconnect_amarula(state)
-
-    case fetch_and_update_session(state, &WhatsApp.mark_session_disconnected/1) do
-      {:ok, session} -> {:reply, {:ok, session}, state}
+    with {:ok, state} <- disconnect_amarula(state),
+         {:ok, session} <- fetch_and_update_session(state, &WhatsApp.mark_session_disconnected/1) do
+      Logger.info("WhatsApp session disconnected", session_id: state.session_id)
+      {:reply, {:ok, session}, state}
+    else
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end
@@ -119,7 +121,7 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
   end
 
   def handle_call(:resume, _from, state) do
-    if live_connection?(state) do
+    if connected_connection?(state) do
       reply_session_update(state, &WhatsApp.resume_session/1)
     else
       {:reply, {:error, :not_connected}, state}
@@ -127,17 +129,17 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
   end
 
   def handle_call(:logout, _from, state) do
-    state = wipe_credentials(state)
+    state = logout_amarula(state)
     WhatsApp.clear_auth_states(state.session_id)
 
     case fetch_and_update_session(state, &WhatsApp.mark_session_disconnected/1) do
-      {:ok, session} -> {:reply, {:ok, session}, %{state | conn_pid: nil, conn_monitor: nil}}
-      {:error, reason} -> {:reply, {:error, reason}, %{state | conn_pid: nil, conn_monitor: nil}}
+      {:ok, session} -> {:reply, {:ok, session}, clear_connection_state(state)}
+      {:error, reason} -> {:reply, {:error, reason}, clear_connection_state(state)}
     end
   end
 
   def handle_call(:delete, _from, state) do
-    state = wipe_credentials(state)
+    state = logout_amarula(state)
     WhatsApp.clear_auth_states(state.session_id)
 
     reply =
@@ -146,11 +148,11 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
         :ok
       end
 
-    {:stop, :normal, reply, %{state | conn_pid: nil, conn_monitor: nil}}
+    {:stop, :normal, reply, clear_connection_state(state)}
   end
 
   def handle_call({:send_reply, jid, text, opts}, _from, state) do
-    if live_connection?(state) do
+    if connected_connection?(state) do
       {:reply, Amarula.send_text(Amarula.via(state.session_id), jid, text, opts), state}
     else
       {:reply, {:error, :not_connected}, state}
@@ -253,7 +255,11 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
 
       {:error, {:already_running, pid}} ->
         :ok = Amarula.set_parent(Amarula.via(state.session_id), self())
-        {:ok, pid}
+
+        case Amarula.reconnect(Amarula.via(state.session_id)) do
+          :ok -> {:ok, pid}
+          {:error, reason} -> {:error, reason}
+        end
 
       {:error, reason} ->
         {:error, reason}
@@ -272,12 +278,24 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
   defp monitor_connection(state), do: state
 
   defp disconnect_amarula(state) do
-    if live_connection?(state), do: Amarula.disconnect(Amarula.via(state.session_id))
-    state
+    case connection_pid(state) do
+      nil ->
+        {:ok, state}
+
+      pid when is_pid(pid) ->
+        case Amarula.disconnect(pid) do
+          :ok -> {:ok, state}
+          {:error, reason} -> {:error, reason}
+        end
+    end
+  catch
+    :exit, {:noproc, _} -> {:ok, clear_connection_state(state)}
+    :exit, {:normal, _} -> {:ok, clear_connection_state(state)}
+    :exit, reason -> {:error, reason}
   end
 
-  defp wipe_credentials(state) do
-    if live_connection?(state) do
+  defp logout_amarula(state) do
+    if connected_connection?(state) do
       case Amarula.wipe_credentials(Amarula.via(state.session_id)) do
         :ok ->
           :ok
@@ -294,6 +312,13 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
     state
   end
 
+  defp clear_connection_state(%{conn_monitor: ref} = state) when is_reference(ref) do
+    Process.demonitor(ref, [:flush])
+    %{state | conn_pid: nil, conn_monitor: nil}
+  end
+
+  defp clear_connection_state(state), do: %{state | conn_pid: nil, conn_monitor: nil}
+
   defp stop_amarula(session_id) do
     case Amarula.stop(session_id) do
       :ok ->
@@ -307,7 +332,21 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
     end
   end
 
-  defp live_connection?(state), do: not is_nil(Amarula.whereis(state.session_id))
+  defp connected_connection?(state) do
+    case connection_pid(state) do
+      nil -> false
+      pid -> Amarula.connection_state(pid) == :connected
+    end
+  catch
+    :exit, _reason -> false
+  end
+
+  defp connection_pid(state) do
+    case Amarula.whereis(state.session_id) do
+      pid when is_pid(pid) -> pid
+      nil -> state.conn_pid
+    end
+  end
 
   defp reply_session_update(state, fun) do
     case fetch_and_update_session(state, fun) do
@@ -350,7 +389,41 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
   defp phone_number_from(%{"phone_number" => phone_number}) when is_binary(phone_number),
     do: phone_number
 
+  defp phone_number_from(%{me: me}), do: phone_number_from_identity(me)
+  defp phone_number_from(%{"me" => me}), do: phone_number_from_identity(me)
+  defp phone_number_from(%{identity: identity}), do: phone_number_from_identity(identity)
+  defp phone_number_from(%{"identity" => identity}), do: phone_number_from_identity(identity)
+
   defp phone_number_from(_data), do: nil
+
+  defp phone_number_from_identity(%{id: jid}) when is_binary(jid), do: phone_number_from_jid(jid)
+
+  defp phone_number_from_identity(%{"id" => jid}) when is_binary(jid),
+    do: phone_number_from_jid(jid)
+
+  defp phone_number_from_identity(%{jid: jid}) when is_binary(jid), do: phone_number_from_jid(jid)
+
+  defp phone_number_from_identity(%{"jid" => jid}) when is_binary(jid),
+    do: phone_number_from_jid(jid)
+
+  defp phone_number_from_identity(jid) when is_binary(jid), do: phone_number_from_jid(jid)
+
+  defp phone_number_from_identity(%Address{} = address) do
+    case Address.to_jid(address) do
+      {:ok, jid} -> phone_number_from_jid(jid)
+      {:error, :no_jid} -> nil
+    end
+  end
+
+  defp phone_number_from_identity(_identity), do: nil
+
+  defp phone_number_from_jid(jid) do
+    jid
+    |> String.split("@", parts: 2)
+    |> hd()
+    |> String.split(":", parts: 2)
+    |> hd()
+  end
 
   defp elem_tuple(tuple, index) when is_tuple(tuple) and tuple_size(tuple) > index do
     elem(tuple, index)

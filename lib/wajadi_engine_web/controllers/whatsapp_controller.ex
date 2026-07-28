@@ -25,7 +25,7 @@ defmodule WajadiEngineWeb.WhatsAppController do
            SessionParams.validate_create(Map.get(params, "_json", Map.drop(params, ["user_id"]))),
          {:ok, session} <- create_or_reuse_session(user_id, attrs),
          {:ok, session} <- WhatsApp.mark_session_connecting(session),
-         {:ok, _pid} <- start_runtime(session) do
+         {:ok, _pid} <- connect_runtime(session) do
       render_success(conn, 201, "Session created", %{
         session_id: session.session_id,
         user_id: session.user_id,
@@ -82,7 +82,7 @@ defmodule WajadiEngineWeb.WhatsAppController do
   def connect(conn, %{"user_id" => user_id, "session_id" => session_id}) do
     with {:ok, session} <- WhatsApp.fetch_session_for_user(user_id, session_id),
          {:ok, _session} <- WhatsApp.mark_session_connecting(session),
-         {:ok, _pid} <- start_runtime(session) do
+         {:ok, _pid} <- connect_runtime(session) do
       render_success(conn, 200, "Session connecting", %{
         session_id: session_id,
         status: "connecting"
@@ -198,6 +198,13 @@ defmodule WajadiEngineWeb.WhatsAppController do
 
   defp start_runtime(%Session{} = session) do
     SessionSupervisor.start_session(session.user_id, session.session_id, session_start_opts())
+  end
+
+  defp connect_runtime(%Session{} = session) do
+    case SessionSupervisor.whereis(session.session_id) do
+      pid when is_pid(pid) -> SessionServer.connect(pid)
+      nil -> start_runtime(session)
+    end
   end
 
   defp stop_runtime(session_id) do
