@@ -3,9 +3,13 @@ defmodule WajadiEngine.WhatsApp.SessionServerTest do
 
   import Ecto.Query
 
+  alias Amarula.Address
+  alias Amarula.Protocol.Auth.AuthUtils
+  alias Amarula.Protocol.Proto
   alias WajadiEngine.Repo
   alias WajadiEngine.WhatsApp
   alias WajadiEngine.WhatsApp.AuthState
+  alias WajadiEngine.WhatsApp.ChatHistory
   alias WajadiEngine.WhatsApp.SessionRestorer
   alias WajadiEngine.WhatsApp.SessionServer
   alias WajadiEngine.WhatsApp.SessionSupervisor
@@ -118,7 +122,7 @@ defmodule WajadiEngine.WhatsApp.SessionServerTest do
       assert {:ok, pid} =
                SessionSupervisor.start_session(session.user_id, session.session_id,
                  connect: false,
-                 amarula_config: %{offline: true, connection_state: :connected}
+                 amarula_config: offline_config()
                )
 
       on_exit(fn -> SessionSupervisor.stop_session(session.session_id) end)
@@ -135,7 +139,7 @@ defmodule WajadiEngine.WhatsApp.SessionServerTest do
       assert {:ok, pid} =
                SessionSupervisor.start_session(session.user_id, session.session_id,
                  connect: false,
-                 amarula_config: %{offline: true, connection_state: :connected}
+                 amarula_config: offline_config()
                )
 
       on_exit(fn -> SessionSupervisor.stop_session(session.session_id) end)
@@ -144,6 +148,96 @@ defmodule WajadiEngine.WhatsApp.SessionServerTest do
       assert is_pid(conn_pid)
       assert {:ok, msg_id} = SessionServer.send_reply(pid, "628123@s.whatsapp.net", "hi")
       assert is_binary(msg_id)
+    end
+
+    test "incoming text message inserts received chat history" do
+      session_id = unique_session_id()
+      assert {:ok, session} = WhatsApp.create_session("user-1", %{session_id: session_id})
+
+      assert {:ok, pid} =
+               SessionSupervisor.start_session(session.user_id, session.session_id,
+                 connect: false,
+                 amarula_config: offline_config()
+               )
+
+      on_exit(fn -> SessionSupervisor.stop_session(session.session_id) end)
+
+      assert {:ok, conn_pid} = SessionServer.connect(pid)
+      Amarula.Testing.deliver_text(conn_pid, from: "628123@s.whatsapp.net", text: "hello")
+      :sys.get_state(conn_pid)
+      :sys.get_state(pid)
+
+      assert [chat_history] = chat_histories(session.session_id)
+      assert chat_history.from == "628123@s.whatsapp.net"
+      assert chat_history.to == "10000000000@s.whatsapp.net"
+      assert chat_history.from_me == false
+      assert chat_history.body == "hello"
+      assert chat_history.type == "text"
+      assert chat_history.status == "received"
+    end
+
+    test "incoming from_me messages are skipped" do
+      session_id = unique_session_id()
+      assert {:ok, session} = WhatsApp.create_session("user-1", %{session_id: session_id})
+
+      assert {:ok, pid} =
+               SessionSupervisor.start_session(session.user_id, session.session_id,
+                 connect: false,
+                 amarula_config: %{offline: true, connection_state: :connected}
+               )
+
+      on_exit(fn -> SessionSupervisor.stop_session(session.session_id) end)
+
+      send(pid, {:amarula, :messages_upsert, %{messages: [text_msg(from_me: true)]}})
+      :sys.get_state(pid)
+
+      assert chat_histories(session.session_id) == []
+    end
+
+    test "successful reply logs one sent outgoing row" do
+      session_id = unique_session_id()
+      assert {:ok, session} = WhatsApp.create_session("user-1", %{session_id: session_id})
+
+      assert {:ok, pid} =
+               SessionSupervisor.start_session(session.user_id, session.session_id,
+                 connect: false,
+                 amarula_config: offline_config()
+               )
+
+      on_exit(fn -> SessionSupervisor.stop_session(session.session_id) end)
+
+      assert {:ok, _conn_pid} = SessionServer.connect(pid)
+      assert {:ok, msg_id} = SessionServer.send_reply(pid, "628123", "hi")
+      assert is_binary(msg_id)
+
+      assert [chat_history] = chat_histories(session.session_id)
+      assert chat_history.from == "10000000000@s.whatsapp.net"
+      assert chat_history.to == "628123@s.whatsapp.net"
+      assert chat_history.from_me == true
+      assert chat_history.body == "hi"
+      assert chat_history.type == "text"
+      assert chat_history.status == "sent"
+      assert chat_history.error == nil
+    end
+
+    test "failed reply logs failed outgoing row" do
+      session_id = unique_session_id()
+      assert {:ok, session} = WhatsApp.create_session("user-1", %{session_id: session_id})
+
+      assert {:ok, pid} =
+               SessionSupervisor.start_session(session.user_id, session.session_id,
+                 connect: false
+               )
+
+      on_exit(fn -> SessionSupervisor.stop_session(session.session_id) end)
+
+      assert {:error, :not_connected} = SessionServer.send_reply(pid, "628123", "hi")
+
+      assert [chat_history] = chat_histories(session.session_id)
+      assert chat_history.to == "628123@s.whatsapp.net"
+      assert chat_history.from_me == true
+      assert chat_history.status == "failed"
+      assert chat_history.error =~ ":not_connected"
     end
 
     test "delete removes session and stops runtime process" do
@@ -211,5 +305,39 @@ defmodule WajadiEngine.WhatsApp.SessionServerTest do
     AuthState
     |> where([auth_state], auth_state.session_id == ^session_id)
     |> Repo.aggregate(:count)
+  end
+
+  defp chat_histories(session_id) do
+    ChatHistory
+    |> where([chat_history], chat_history.session_id == ^session_id)
+    |> order_by([chat_history], asc: chat_history.inserted_at)
+    |> Repo.all()
+  end
+
+  defp offline_config do
+    %{
+      offline: true,
+      connection_state: :connected,
+      auth:
+        Map.put(AuthUtils.init_auth_creds(), :me, %{
+          id: "10000000000@s.whatsapp.net",
+          name: "Test Bot"
+        })
+    }
+  end
+
+  defp text_msg(opts) do
+    from_me? = Keyword.get(opts, :from_me, false)
+
+    %Amarula.Msg{
+      id: "msg-1",
+      channel: Address.pn("628123"),
+      from: Address.pn("628123"),
+      to: Address.pn("10000000000"),
+      from_me: from_me?,
+      type: :text,
+      content: "own message",
+      raw: %Proto.Message{}
+    }
   end
 end

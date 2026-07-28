@@ -9,6 +9,7 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
 
   alias Amarula.Address
   alias WajadiEngine.WhatsApp
+  alias WajadiEngine.WhatsApp.Helpers
 
   @registry WajadiEngine.WhatsApp.SessionRegistry
 
@@ -152,11 +153,15 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
   end
 
   def handle_call({:send_reply, jid, text, opts}, _from, state) do
-    if connected_connection?(state) do
-      {:reply, Amarula.send_text(Amarula.via(state.session_id), jid, text, opts), state}
-    else
-      {:reply, {:error, :not_connected}, state}
+    {save_history?, send_opts} = Keyword.pop(opts, :save_history, true)
+
+    result = send_text_result(state, jid, text, send_opts)
+
+    if save_history? do
+      log_outgoing_message(state, jid, text, "text", result)
     end
+
+    {:reply, result, state}
   end
 
   @impl true
@@ -184,6 +189,8 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
 
   def handle_info({:amarula, :messages_upsert, %{messages: messages}}, state)
       when is_list(messages) do
+    Enum.each(messages, &log_incoming_message(state, &1))
+
     {:noreply, state}
   end
 
@@ -347,6 +354,97 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
       nil -> state.conn_pid
     end
   end
+
+  defp send_text_result(state, jid, text, opts) do
+    if connected_connection?(state) do
+      Helpers.send_text(Amarula.via(state.session_id), jid, text, opts)
+    else
+      {:error, :not_connected}
+    end
+  rescue
+    exception -> {:error, Exception.message(exception)}
+  catch
+    :exit, reason -> {:error, reason}
+  end
+
+  defp log_incoming_message(_state, %Amarula.Msg{from_me: true}), do: :ok
+
+  defp log_incoming_message(state, %Amarula.Msg{} = message) do
+    case Helpers.extract_message_content(message) do
+      nil ->
+        :ok
+
+      body ->
+        attrs = %{
+          session_id: state.session_id,
+          from: inbound_from(message),
+          to: inbound_to(state, message),
+          body: body,
+          type: Helpers.message_type(message)
+        }
+
+        case WhatsApp.create_incoming_chat_history(attrs) do
+          {:ok, _chat_history} ->
+            :ok
+
+          {:error, reason} ->
+            Logger.warning("WhatsApp incoming message log failed",
+              session_id: state.session_id,
+              message_id: message.id,
+              reason: inspect(reason)
+            )
+        end
+    end
+  end
+
+  defp log_incoming_message(_state, _message), do: :ok
+
+  defp log_outgoing_message(state, jid, body, type, result) do
+    attrs = %{
+      session_id: state.session_id,
+      from: own_jid(state) || "unknown",
+      to: Helpers.format_to_jid(jid),
+      body: body,
+      type: type,
+      status: outgoing_status(result),
+      error: outgoing_error(result)
+    }
+
+    case WhatsApp.create_outgoing_chat_history(attrs) do
+      {:ok, _chat_history} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("WhatsApp outgoing message log failed",
+          session_id: state.session_id,
+          status: attrs.status,
+          reason: inspect(reason)
+        )
+    end
+  end
+
+  defp inbound_from(%Amarula.Msg{} = message) do
+    Helpers.address_to_jid(message.from) || Helpers.address_to_jid(message.channel) || "unknown"
+  end
+
+  defp inbound_to(state, %Amarula.Msg{} = message) do
+    Helpers.address_to_jid(message.to) || own_jid(state) || "unknown"
+  end
+
+  defp own_jid(state) do
+    case connection_pid(state) do
+      pid when is_pid(pid) -> pid |> Amarula.own_address() |> Helpers.address_to_jid()
+      _nil -> nil
+    end
+  catch
+    :exit, _reason -> nil
+  end
+
+  defp outgoing_status({:ok, _result}), do: "sent"
+  defp outgoing_status({:error, _reason}), do: "failed"
+
+  defp outgoing_error({:ok, _result}), do: nil
+  defp outgoing_error({:error, reason}), do: inspect(reason)
 
   defp reply_session_update(state, fun) do
     case fetch_and_update_session(state, fun) do
