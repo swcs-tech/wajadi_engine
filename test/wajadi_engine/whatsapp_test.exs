@@ -174,5 +174,46 @@ defmodule WajadiEngine.WhatsAppTest do
       assert WhatsApp.clear_auth_states("session-1") == 1
       refute Repo.get_by(AuthState, session_id: "session-1", type: "creds", key: "creds")
     end
+
+    test "lists auth state metadata without exposing values" do
+      assert {:ok, _creds} =
+               WhatsApp.create_auth_state(%{
+                 session_id: "session-1",
+                 type: "creds",
+                 key: "creds",
+                 value: %{"secret" => "hidden"},
+                 encoding: "json"
+               })
+
+      assert {:ok, _session_key} =
+               WhatsApp.create_auth_state(%{
+                 session_id: "session-1",
+                 type: "session",
+                 key: "device-1",
+                 value: %{"data" => "hidden"},
+                 encoding: "erlang_term_base64"
+               })
+
+      assert [creds_metadata, session_metadata] = WhatsApp.list_auth_state_metadata("session-1")
+
+      assert creds_metadata == %{
+               type: "creds",
+               key: "creds",
+               encoding: "json",
+               updated_at: creds_metadata.updated_at
+             }
+
+      assert session_metadata == %{
+               type: "session",
+               key: "device-1",
+               encoding: "erlang_term_base64",
+               updated_at: session_metadata.updated_at
+             }
+
+      assert %DateTime{} = creds_metadata.updated_at
+      assert %DateTime{} = session_metadata.updated_at
+      refute Map.has_key?(creds_metadata, :value)
+      refute Map.has_key?(session_metadata, :value)
+    end
   end
 end

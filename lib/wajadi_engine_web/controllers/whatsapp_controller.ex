@@ -277,7 +277,7 @@ defmodule WajadiEngineWeb.WhatsAppController do
   end
 
   defp render_server_error(conn, source, reason) do
-    Logger.error("WhatsApp controller error", source: source, reason: inspect(reason))
+    Logger.error("WhatsApp controller error", source: source, reason: safe_reason(reason))
 
     conn
     |> put_status(500)
@@ -291,4 +291,18 @@ defmodule WajadiEngineWeb.WhatsAppController do
       end)
     end)
   end
+
+  defp safe_reason(%Ecto.Changeset{}), do: :changeset_invalid
+  defp safe_reason(%module{}) when is_atom(module), do: module
+  defp safe_reason(reason) when is_atom(reason), do: reason
+
+  defp safe_reason(reason) when is_tuple(reason) and tuple_size(reason) > 0 do
+    case elem(reason, 0) do
+      tag when is_atom(tag) -> tag
+      _other -> :tuple_reason
+    end
+  end
+
+  defp safe_reason(reason) when is_binary(reason), do: :binary_reason
+  defp safe_reason(_reason), do: :unknown_reason
 end

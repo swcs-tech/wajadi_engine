@@ -30,7 +30,7 @@ defmodule WajadiEngine.WhatsApp.SessionRestorer do
           {:error, reason} ->
             Logger.warning("WhatsApp active session restore failed",
               session_id: session.session_id,
-              reason: inspect(reason)
+              reason: safe_reason(reason)
             )
 
             %{acc | failed: acc.failed + 1}
@@ -61,7 +61,7 @@ defmodule WajadiEngine.WhatsApp.SessionRestorer do
   rescue
     exception ->
       Logger.error("WhatsApp active session restore crashed",
-        reason: Exception.message(exception)
+        reason: exception.__struct__
       )
 
       {:noreply, opts}
@@ -70,4 +70,16 @@ defmodule WajadiEngine.WhatsApp.SessionRestorer do
   defp restore_enabled? do
     Application.get_env(:wajadi_engine, :whatsapp_restore_active_sessions, true)
   end
+
+  defp safe_reason(reason) when is_atom(reason), do: reason
+
+  defp safe_reason(reason) when is_tuple(reason) and tuple_size(reason) > 0 do
+    case elem(reason, 0) do
+      tag when is_atom(tag) -> tag
+      _other -> :tuple_reason
+    end
+  end
+
+  defp safe_reason(reason) when is_binary(reason), do: :binary_reason
+  defp safe_reason(_reason), do: :unknown_reason
 end

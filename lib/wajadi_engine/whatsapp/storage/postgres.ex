@@ -49,7 +49,7 @@ defmodule WajadiEngine.WhatsApp.Storage.Postgres do
                 session_id: profile_id(profile),
                 type: type,
                 key: row_key,
-                reason: inspect(reason)
+                reason: safe_reason(reason)
               )
 
               :error
@@ -166,4 +166,16 @@ defmodule WajadiEngine.WhatsApp.Storage.Postgres do
 
   defp profile_id(profile) when is_binary(profile), do: profile
   defp profile_id(profile) when is_atom(profile), do: Atom.to_string(profile)
+
+  defp safe_reason(reason) when is_atom(reason), do: reason
+
+  defp safe_reason(reason) when is_tuple(reason) and tuple_size(reason) > 0 do
+    case elem(reason, 0) do
+      tag when is_atom(tag) -> tag
+      _other -> :tuple_reason
+    end
+  end
+
+  defp safe_reason(reason) when is_binary(reason), do: :binary_reason
+  defp safe_reason(_reason), do: :unknown_reason
 end

@@ -240,6 +240,88 @@ defmodule WajadiEngine.WhatsApp.SessionServerTest do
       assert chat_history.error =~ ":not_connected"
     end
 
+    test "paused session logs incoming but skips AI reply" do
+      session_id = unique_session_id()
+      assert {:ok, session} = WhatsApp.create_session("user-1", %{session_id: session_id})
+      assert {:ok, session} = WhatsApp.mark_session_connected(session)
+
+      assert {:ok, pid} =
+               SessionSupervisor.start_session(session.user_id, session.session_id,
+                 connect: false,
+                 ai_agent: WajadiEngine.FakeAI.SuccessAgent,
+                 ai_async?: false,
+                 amarula_config: offline_config()
+               )
+
+      on_exit(fn -> SessionSupervisor.stop_session(session.session_id) end)
+
+      assert {:ok, _conn_pid} = SessionServer.connect(pid)
+      assert {:ok, _paused} = SessionServer.pause(pid)
+
+      send(pid, {:amarula, :messages_upsert, %{messages: [text_msg(content: "hello")]}})
+      :sys.get_state(pid)
+
+      assert [incoming] = chat_histories(session.session_id)
+      assert incoming.from_me == false
+      assert incoming.body == "hello"
+    end
+
+    test "connected session calls AI and logs outgoing reply once" do
+      session_id = unique_session_id()
+      assert {:ok, session} = WhatsApp.create_session("user-1", %{session_id: session_id})
+      assert {:ok, _session} = WhatsApp.mark_session_connected(session)
+
+      assert {:ok, pid} =
+               SessionSupervisor.start_session(session.user_id, session.session_id,
+                 connect: false,
+                 ai_agent: WajadiEngine.FakeAI.SuccessAgent,
+                 ai_async?: false,
+                 amarula_config: offline_config()
+               )
+
+      on_exit(fn -> SessionSupervisor.stop_session(session.session_id) end)
+
+      assert {:ok, _conn_pid} = SessionServer.connect(pid)
+      assert {:ok, session} = WhatsApp.fetch_session(session.session_id)
+      assert {:ok, _session} = WhatsApp.mark_session_connected(session)
+      send(pid, {:amarula, :messages_upsert, %{messages: [text_msg(content: "hello")]}})
+      :sys.get_state(pid)
+
+      assert [incoming, outgoing] = chat_histories(session.session_id)
+      assert incoming.from_me == false
+      assert incoming.body == "hello"
+      assert incoming.status == "received"
+      assert outgoing.from_me == true
+      assert outgoing.body == "AI reply to hello"
+      assert outgoing.status == "sent"
+    end
+
+    test "AI error keeps session process alive and skips outgoing reply" do
+      session_id = unique_session_id()
+      assert {:ok, session} = WhatsApp.create_session("user-1", %{session_id: session_id})
+      assert {:ok, _session} = WhatsApp.mark_session_connected(session)
+
+      assert {:ok, pid} =
+               SessionSupervisor.start_session(session.user_id, session.session_id,
+                 connect: false,
+                 ai_agent: WajadiEngine.FakeAI.ErrorAgent,
+                 ai_async?: false,
+                 amarula_config: offline_config()
+               )
+
+      on_exit(fn -> SessionSupervisor.stop_session(session.session_id) end)
+
+      assert {:ok, _conn_pid} = SessionServer.connect(pid)
+      assert {:ok, session} = WhatsApp.fetch_session(session.session_id)
+      assert {:ok, _session} = WhatsApp.mark_session_connected(session)
+      send(pid, {:amarula, :messages_upsert, %{messages: [text_msg(content: "hello")]}})
+
+      assert %SessionServer{} = :sys.get_state(pid)
+      assert [incoming] = chat_histories(session.session_id)
+      assert incoming.from_me == false
+      assert incoming.body == "hello"
+    end
+
     test "delete removes session and stops runtime process" do
       session_id = unique_session_id()
       assert {:ok, session} = WhatsApp.create_session("user-1", %{session_id: session_id})
@@ -328,6 +410,7 @@ defmodule WajadiEngine.WhatsApp.SessionServerTest do
 
   defp text_msg(opts) do
     from_me? = Keyword.get(opts, :from_me, false)
+    content = Keyword.get(opts, :content, "own message")
 
     %Amarula.Msg{
       id: "msg-1",
@@ -336,7 +419,7 @@ defmodule WajadiEngine.WhatsApp.SessionServerTest do
       to: Address.pn("10000000000"),
       from_me: from_me?,
       type: :text,
-      content: "own message",
+      content: content,
       raw: %Proto.Message{}
     }
   end
