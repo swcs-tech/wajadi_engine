@@ -22,10 +22,34 @@ end
 
 config :wajadi_engine, WajadiEngineWeb.Endpoint, http: [port: env!("PORT", :integer!, 4000)]
 
+env_string = fn name, default ->
+  case env!(name) do
+    nil ->
+      default
+
+    value ->
+      case String.trim(value) do
+        "" -> default
+        value -> value
+      end
+  end
+end
+
 config :wajadi_engine, :ai,
-  nine_router_base_url: env!("NINE_ROUTER_BASE_URL", :string!, "http://localhost:20128/v1"),
-  nine_router_api_key: env!("NINE_ROUTER_API_KEY", :string!, "dummy-key"),
-  nine_router_model: env!("NINE_ROUTER_MODEL", :string!, "gpt-4o")
+  nine_router_base_url: env_string.("NINE_ROUTER_BASE_URL", "http://localhost:20128/v1"),
+  nine_router_api_key: env_string.("NINE_ROUTER_API_KEY", "dummy-key"),
+  nine_router_model: env_string.("NINE_ROUTER_MODEL", "gpt-4o")
+
+case System.get_env("PRINT_WA_QR") do
+  value when value in ["1", "true", "TRUE", "yes", "YES"] ->
+    config :wajadi_engine, :whatsapp_print_qr, true
+
+  value when value in ["0", "false", "FALSE", "no", "NO"] ->
+    config :wajadi_engine, :whatsapp_print_qr, false
+
+  _unset_or_empty ->
+    :ok
+end
 
 if config_env() == :prod do
   maybe_ipv6 = if env!("ECTO_IPV6", :boolean!, false), do: [:inet6], else: []

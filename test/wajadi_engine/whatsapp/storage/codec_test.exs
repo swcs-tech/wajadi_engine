@@ -51,11 +51,16 @@ defmodule WajadiEngine.WhatsApp.Storage.CodecTest do
       assert {:ok, ^term} = Codec.decode("erlang_term_base64", json_value)
     end
 
-    test "rejects unknown atom tags without creating atoms" do
+    test "restores persisted internal atom tags" do
       value = %{"__type__" => "atom", "value" => "definitely_missing_atom_for_codec_test"}
 
-      assert {:error, {:unknown_atom, "definitely_missing_atom_for_codec_test"}} =
-               Codec.decode("json", value)
+      assert {:ok, :definitely_missing_atom_for_codec_test} = Codec.decode("json", value)
+    end
+
+    test "rejects invalid persisted atom tags" do
+      value = %{"__type__" => "atom", "value" => "invalid atom with spaces"}
+
+      assert {:error, {:invalid_atom, "invalid atom with spaces"}} = Codec.decode("json", value)
     end
 
     test "rejects oversized fallback payloads before decoding" do

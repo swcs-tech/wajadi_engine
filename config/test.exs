@@ -21,6 +21,7 @@ config :wajadi_engine, WajadiEngineWeb.Endpoint,
 config :logger, level: :warning
 
 config :wajadi_engine, :whatsapp_restore_active_sessions, false
+config :wajadi_engine, :whatsapp_print_qr, false
 
 config :wajadi_engine, :whatsapp_session_start_opts,
   amarula_config: %{
@@ -34,6 +35,14 @@ config :wajadi_engine, :ai,
   nine_router_base_url: "http://localhost:20128/v1",
   nine_router_api_key: "dummy-key",
   nine_router_model: "gpt-4o"
+
+config :wajadi_engine, :ai_agent,
+  personality: "Kamu adalah admin toko Wajadi. Balas singkat dan ramah."
+
+config :wajadi_engine, :product_catalog,
+  products: [
+    %{name: "Produk Test", price: "Rp10.000", stock: "ready"}
+  ]
 
 config :phoenix, :plug_init_mode, :runtime
 

@@ -4,6 +4,7 @@ defmodule WajadiEngine.AI.AgentTest do
   alias Amarula.Protocol.Auth.AuthUtils
   alias WajadiEngine.AI
   alias WajadiEngine.AI.Agent
+  alias WajadiEngine.ProductCatalog
   alias WajadiEngine.WhatsApp
   alias WajadiEngine.WhatsApp.SessionSupervisor
 
@@ -30,18 +31,38 @@ defmodule WajadiEngine.AI.AgentTest do
   end
 
   describe "tools/0" do
-    test "defines TS-compatible tool names" do
+    test "defaults to read-only auto-reply tools" do
       names = Agent.tools() |> Enum.map(& &1.name) |> Enum.sort()
+
+      assert names == ["get_product_list"]
+    end
+
+    test "get_product_list returns configured products" do
+      tool = tool!("get_product_list")
+
+      assert {:ok, message} = tool.function.(%{}, %{})
+
+      assert message =~ "Produk Test"
+      assert message =~ "Rp10.000"
+      assert message =~ "ready"
+    end
+  end
+
+  describe "action_tools/0" do
+    test "keeps WhatsApp send tools out of default auto-reply tools" do
+      names = Agent.action_tools() |> Enum.map(& &1.name) |> Enum.sort()
 
       assert names == [
                "reply_whatsapp_message",
                "send_whatsapp_image",
                "send_whatsapp_message"
              ]
+
+      refute Enum.any?(Agent.tools(), &(&1.name in names))
     end
 
     test "send_whatsapp_message reports inactive session" do
-      tool = tool!("send_whatsapp_message")
+      tool = action_tool!("send_whatsapp_message")
 
       assert {:ok, message} =
                tool.function.(
@@ -65,7 +86,7 @@ defmodule WajadiEngine.AI.AgentTest do
       on_exit(fn -> SessionSupervisor.stop_session(session.session_id) end)
 
       assert {:ok, _conn_pid} = WajadiEngine.WhatsApp.SessionServer.connect(pid)
-      tool = tool!("send_whatsapp_message")
+      tool = action_tool!("send_whatsapp_message")
 
       assert {:ok, message} =
                tool.function.(
@@ -75,6 +96,22 @@ defmodule WajadiEngine.AI.AgentTest do
 
       assert message == "Successfully sent text message to 628123"
       assert WhatsApp.count_chat_histories(session.session_id) == 0
+    end
+  end
+
+  describe "system_prompt/0" do
+    test "includes configured personality and final-reply safety policy" do
+      prompt = Agent.system_prompt()
+
+      assert prompt =~ "admin toko Wajadi"
+      assert prompt =~ "final reply"
+      assert prompt =~ "get_product_list"
+    end
+  end
+
+  describe "ProductCatalog" do
+    test "formats configured products" do
+      assert ProductCatalog.format_products() == "1. Produk Test - Rp10.000 - ready"
     end
   end
 
@@ -91,6 +128,10 @@ defmodule WajadiEngine.AI.AgentTest do
 
   defp tool!(name) do
     Enum.find(Agent.tools(), &(&1.name == name))
+  end
+
+  defp action_tool!(name) do
+    Enum.find(Agent.action_tools(), &(&1.name == name))
   end
 
   defp unique_session_id do

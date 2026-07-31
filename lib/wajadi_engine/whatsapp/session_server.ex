@@ -11,6 +11,7 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
   alias WajadiEngine.AI.Agent
   alias WajadiEngine.WhatsApp
   alias WajadiEngine.WhatsApp.Helpers
+  alias WajadiEngine.WhatsApp.TerminalQR
 
   @registry WajadiEngine.WhatsApp.SessionRegistry
 
@@ -208,6 +209,7 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
   @impl true
   def handle_info({:amarula, :connection_update, %{qr: qr}}, state) when is_binary(qr) do
     update_session_best_effort(state, fn session -> WhatsApp.mark_session_qr(session, qr) end)
+    TerminalQR.maybe_print(state.session_id, qr)
     Logger.info("WhatsApp QR received", session_id: state.session_id)
     {:noreply, state}
   end
@@ -223,8 +225,8 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
 
   def handle_info({:amarula, :connection_update, %{connection: connection}}, state)
       when connection in [:closed, :disconnected] do
-    update_session_best_effort(state, &WhatsApp.mark_session_disconnected/1)
-    Logger.info("WhatsApp session disconnected", session_id: state.session_id)
+    update_session_best_effort(state, &mark_runtime_disconnected/1)
+    Logger.info("WhatsApp session connection interrupted", session_id: state.session_id)
     {:noreply, state}
   end
 
@@ -278,7 +280,7 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
 
   defp do_connect(state) do
     with {:ok, session} <- WhatsApp.fetch_session_for_user(state.user_id, state.session_id),
-         {:ok, _session} <- WhatsApp.mark_session_connecting(session),
+         {:ok, _session} <- mark_session_starting(session),
          {:ok, pid} <- start_or_adopt_amarula(state) do
       Logger.info("WhatsApp session connection started", session_id: state.session_id)
       {:ok, pid, monitor_connection(%{state | conn_pid: pid})}
@@ -312,6 +314,19 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  defp mark_session_starting(%{is_active: true} = session),
+    do: WhatsApp.mark_session_reconnecting(session)
+
+  defp mark_session_starting(session), do: WhatsApp.mark_session_connecting(session)
+
+  defp mark_runtime_disconnected(session) do
+    if session.is_active do
+      WhatsApp.mark_session_reconnecting(session)
+    else
+      WhatsApp.mark_session_disconnected(session)
     end
   end
 
@@ -522,7 +537,7 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
   end
 
   defp reply_target(%Amarula.Msg{} = message) do
-    case Helpers.address_to_jid(message.channel) || Helpers.address_to_jid(message.from) do
+    case Helpers.address_to_jid(message.channel) do
       jid when is_binary(jid) -> {:ok, jid}
       nil -> {:error, :missing_reply_target}
     end
@@ -585,6 +600,7 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
   defp outgoing_status({:error, _reason}), do: "failed"
 
   defp outgoing_error({:ok, _result}), do: nil
+  defp outgoing_error({:error, {:send_rejected, code}}), do: "send_rejected:#{code}"
   defp outgoing_error({:error, reason}), do: inspect(safe_reason(reason))
 
   defp media_log_body(type, opts), do: Keyword.get(opts, :caption) || "[#{type}]"

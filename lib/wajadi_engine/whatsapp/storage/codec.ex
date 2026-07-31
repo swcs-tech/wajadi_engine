@@ -7,6 +7,8 @@ defmodule WajadiEngine.WhatsApp.Storage.Codec do
   @fallback_encoding "erlang_term_base64"
   @max_fallback_encoded_bytes 12_000_000
   @max_fallback_decoded_bytes 8_000_000
+  @max_atom_bytes 255
+  @atom_pattern ~r/^Elixir\.[A-Z][A-Za-z0-9_.]*$|^[a-z_][A-Za-z0-9_?!@]*$/
 
   @type encoding :: String.t()
   @type json_value :: map()
@@ -214,8 +216,18 @@ defmodule WajadiEngine.WhatsApp.Storage.Codec do
   defp existing_atom(value) do
     {:ok, String.to_existing_atom(value)}
   rescue
-    ArgumentError -> {:error, {:unknown_atom, value}}
+    ArgumentError -> persisted_atom(value)
   end
+
+  defp persisted_atom(value) when byte_size(value) <= @max_atom_bytes do
+    if Regex.match?(@atom_pattern, value) do
+      {:ok, String.to_atom(value)}
+    else
+      {:error, {:invalid_atom, value}}
+    end
+  end
+
+  defp persisted_atom(value), do: {:error, {:atom_too_large, byte_size(value)}}
 
   defp fallback_encode(value) do
     data = value |> :erlang.term_to_binary() |> Base.encode64()

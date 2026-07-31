@@ -172,6 +172,9 @@ defmodule WajadiEngine.WhatsApp.Storage.Postgres do
   end
 
   defp safe_reason(reason) when is_atom(reason), do: reason
+  defp safe_reason({:unknown_atom, _value}), do: :unknown_atom
+  defp safe_reason({:invalid_atom, _value}), do: :invalid_atom
+  defp safe_reason({:atom_too_large, _size}), do: :atom_too_large
 
   defp safe_reason(reason) when is_tuple(reason) and tuple_size(reason) > 0 do
     case elem(reason, 0) do

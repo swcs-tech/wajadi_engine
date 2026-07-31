@@ -52,6 +52,28 @@ config :wajadi_engine, WajadiEngineWeb.Endpoint,
 # Enable dev routes for dashboard
 config :wajadi_engine, dev_routes: true
 
+config :wajadi_engine, :whatsapp_print_qr, true
+config :wajadi_engine, :whatsapp_restore_active_sessions, true
+config :wajadi_engine, :whatsapp_session_start_opts, []
+
+# postgres personality table
+config :wajadi_engine, :ai_agent,
+  personality: """
+  Kamu adalah admin toko Wajadi.
+  Balas dalam Bahasa Indonesia dengan gaya ramah, singkat, natural, dan membantu.
+  Jangan terlalu formal.
+  Jangan mengarang produk, harga, stok, promo, ongkir, atau estimasi.
+  Jika informasi belum tersedia, katakan belum tahu dan tawarkan bantuan lanjutan.
+  """
+
+# Langchain postgres product table
+config :wajadi_engine, :product_catalog,
+  products: [
+    %{name: "Kopi Arabica 250g", price: "Rp75.000", stock: "ready"},
+    %{name: "Kopi Robusta 250g", price: "Rp55.000", stock: "ready"},
+    %{name: "Drip Bag Coffee 10 pcs", price: "Rp60.000", stock: "ready"}
+  ]
+
 # Do not include metadata nor timestamps in development logs
 config :logger, :default_formatter, format: "[$level] $message\n"
 

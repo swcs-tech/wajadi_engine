@@ -44,9 +44,36 @@ defmodule WajadiEngine.WhatsAppTest do
       assert {:ok, disconnected} = WhatsApp.create_session("user-1", %{session_id: "session-2"})
       assert {:ok, connected} = WhatsApp.mark_session_connected(connected)
       assert {:ok, _disconnected} = WhatsApp.mark_session_disconnected(disconnected)
+      assert {:ok, _auth_state} = create_creds(connected.session_id)
 
       assert [restore_session] = WhatsApp.list_active_sessions_for_restore()
       assert restore_session.session_id == connected.session_id
+    end
+
+    test "lists reconnecting sessions with credentials for restore" do
+      assert {:ok, session} = WhatsApp.create_session("user-1", %{session_id: "session-1"})
+      assert {:ok, session} = WhatsApp.mark_session_connected(session)
+      assert {:ok, session} = WhatsApp.mark_session_reconnecting(session)
+      assert {:ok, _auth_state} = create_creds(session.session_id)
+
+      assert [restore_session] = WhatsApp.list_active_sessions_for_restore()
+      assert restore_session.session_id == session.session_id
+    end
+
+    test "restores paired sessions even if status was disconnected prior to restart" do
+      assert {:ok, session} = WhatsApp.create_session("user-1", %{session_id: "session-1"})
+      assert {:ok, session} = WhatsApp.mark_session_disconnected(session)
+      assert {:ok, _auth_state} = create_creds(session.session_id)
+
+      assert [restore_session] = WhatsApp.list_active_sessions_for_restore()
+      assert restore_session.session_id == session.session_id
+    end
+
+    test "skips active sessions without stored credentials for restore" do
+      assert {:ok, session} = WhatsApp.create_session("user-1", %{session_id: "session-1"})
+      assert {:ok, _session} = WhatsApp.mark_session_connected(session)
+
+      assert WhatsApp.list_active_sessions_for_restore() == []
     end
 
     test "status transitions match allowed lifecycle values" do
@@ -68,6 +95,11 @@ defmodule WajadiEngine.WhatsAppTest do
       assert session.is_active == true
       assert is_nil(session.qr)
       assert %DateTime{} = session.last_connected_at
+
+      assert {:ok, session} = WhatsApp.mark_session_reconnecting(session)
+      assert session.status == "connecting"
+      assert session.is_active == true
+      assert is_nil(session.qr)
 
       assert {:ok, session} = WhatsApp.pause_session(session)
       assert session.status == "paused"
@@ -215,5 +247,14 @@ defmodule WajadiEngine.WhatsAppTest do
       refute Map.has_key?(creds_metadata, :value)
       refute Map.has_key?(session_metadata, :value)
     end
+  end
+
+  defp create_creds(session_id) do
+    WhatsApp.create_auth_state(%{
+      session_id: session_id,
+      type: "creds",
+      key: "creds",
+      value: %{"id" => "1"}
+    })
   end
 end

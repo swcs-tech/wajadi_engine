@@ -68,7 +68,12 @@ defmodule WajadiEngine.WhatsApp do
   @spec list_active_sessions_for_restore() :: [Session.t()]
   def list_active_sessions_for_restore do
     Session
-    |> where([session], session.is_active and session.status == "connected")
+    |> join(:inner, [session], auth_state in AuthState,
+      on:
+        auth_state.session_id == session.session_id and auth_state.type == "creds" and
+          auth_state.key == "creds"
+    )
+    |> where([session, _auth_state], session.status != "paused")
     |> order_by([session], asc: session.inserted_at)
     |> Repo.all()
   end
@@ -79,6 +84,11 @@ defmodule WajadiEngine.WhatsApp do
   @spec mark_session_connecting(Session.t()) :: session_result()
   def mark_session_connecting(%Session{} = session) do
     update_session(session, %{status: "connecting", is_active: false, qr: nil})
+  end
+
+  @spec mark_session_reconnecting(Session.t()) :: session_result()
+  def mark_session_reconnecting(%Session{} = session) do
+    update_session(session, %{status: "connecting", is_active: true, qr: nil})
   end
 
   @spec mark_session_qr(Session.t(), String.t()) :: session_result()

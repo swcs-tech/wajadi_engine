@@ -85,6 +85,27 @@ defmodule WajadiEngine.WhatsApp.SessionServerTest do
       assert %DateTime{} = updated.last_connected_at
     end
 
+    test "connection interruption keeps active session restorable" do
+      session_id = unique_session_id()
+      assert {:ok, session} = WhatsApp.create_session("user-1", %{session_id: session_id})
+      assert {:ok, _session} = WhatsApp.mark_session_connected(session)
+
+      assert {:ok, pid} =
+               SessionSupervisor.start_session(session.user_id, session.session_id,
+                 connect: false
+               )
+
+      on_exit(fn -> SessionSupervisor.stop_session(session.session_id) end)
+
+      send(pid, {:amarula, :connection_update, %{connection: :closed}})
+      :sys.get_state(pid)
+
+      assert {:ok, updated} = WhatsApp.fetch_session(session.session_id)
+      assert updated.status == "connecting"
+      assert updated.is_active == true
+      assert is_nil(updated.qr)
+    end
+
     test "pause, resume, and disconnect update session status" do
       session_id = unique_session_id()
       assert {:ok, session} = WhatsApp.create_session("user-1", %{session_id: session_id})
@@ -368,6 +389,14 @@ defmodule WajadiEngine.WhatsApp.SessionServerTest do
 
       assert {:ok, active} = WhatsApp.mark_session_connected(active)
       assert {:ok, _inactive} = WhatsApp.mark_session_disconnected(inactive)
+
+      assert {:ok, _auth_state} =
+               WhatsApp.create_auth_state(%{
+                 session_id: active.session_id,
+                 type: "creds",
+                 key: "creds",
+                 value: %{"id" => "1"}
+               })
 
       on_exit(fn -> SessionSupervisor.stop_session(active.session_id) end)
 

@@ -11,10 +11,24 @@ defmodule WajadiEngine.AI.Agent do
   alias LangChain.Message
   alias LangChain.Utils.ChainResult
   alias WajadiEngine.AI
+  alias WajadiEngine.ProductCatalog
   alias WajadiEngine.WhatsApp.SessionServer
   alias WajadiEngine.WhatsApp.SessionSupervisor
 
-  @system_prompt "You are a helpful WhatsApp assistant. You can send messages, images, and reply to messages on behalf of the user. Always be concise and friendly. When the user asks you to do something, use the available tools to accomplish it."
+  @default_personality """
+  Kamu adalah admin toko Wajadi.
+  Balas dalam Bahasa Indonesia dengan gaya ramah, singkat, natural, dan membantu.
+  Jangan mengarang produk, harga, stok, promo, ongkir, atau estimasi.
+  """
+
+  @reply_policy """
+  Kamu sedang membuat auto-reply WhatsApp.
+  Aplikasi akan mengirim final reply kamu tepat satu kali ke user.
+  Jangan mencoba mengirim pesan sendiri melalui tool.
+  Jika user bertanya produk, menu, katalog, product list, stok, harga, atau barang yang dijual, gunakan tool get_product_list.
+  Jika data tidak tersedia di tool atau prompt, katakan belum tersedia.
+  """
+
   @media_receive_timeout 15_000
   @media_connect_timeout 5_000
   @max_media_bytes 10 * 1024 * 1024
@@ -22,7 +36,12 @@ defmodule WajadiEngine.AI.Agent do
   @type handle_result :: {:ok, String.t()} | {:error, term()}
 
   @spec system_prompt() :: String.t()
-  def system_prompt, do: @system_prompt
+  def system_prompt do
+    [personality(), @reply_policy]
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.join("\n\n")
+  end
 
   @spec model(keyword()) :: ChatOpenAI.t()
   def model(opts \\ []) do
@@ -40,7 +59,15 @@ defmodule WajadiEngine.AI.Agent do
   end
 
   @spec tools() :: [Function.t()]
-  def tools do
+  def tools, do: reply_tools()
+
+  @spec reply_tools() :: [Function.t()]
+  def reply_tools do
+    [get_product_list_tool()]
+  end
+
+  @spec action_tools() :: [Function.t()]
+  def action_tools do
     [send_whatsapp_message_tool(), send_whatsapp_image_tool(), reply_whatsapp_message_tool()]
   end
 
@@ -59,9 +86,9 @@ defmodule WajadiEngine.AI.Agent do
         llm: llm,
         custom_context: %{session_id: session_id}
       })
-      |> LLMChain.add_tools(Keyword.get(opts, :tools, tools()))
+      |> LLMChain.add_tools(Keyword.get(opts, :tools, reply_tools()))
       |> LLMChain.add_messages([
-        Message.new_system!(@system_prompt),
+        Message.new_system!(system_prompt()),
         Message.new_user!(user_message)
       ])
 
@@ -87,6 +114,20 @@ defmodule WajadiEngine.AI.Agent do
     chain
     |> LLMChain.execute_tool_calls()
     |> LLMChain.execute_step()
+  end
+
+  defp get_product_list_tool do
+    Function.new!(%{
+      name: "get_product_list",
+      description:
+        "Read-only. Returns current product list, prices, stock, and descriptions for product/menu/catalog questions.",
+      parameters_schema: %{
+        type: "object",
+        properties: %{},
+        required: []
+      },
+      function: fn _arguments, _context -> {:ok, ProductCatalog.format_products()} end
+    })
   end
 
   defp send_whatsapp_message_tool do
@@ -295,4 +336,10 @@ defmodule WajadiEngine.AI.Agent do
   defp format_tool_error({:missing_required, field}), do: "Failed: Missing required #{field}."
   defp format_tool_error(:empty_value), do: "Failed: Required value is empty."
   defp format_tool_error(reason), do: "Failed: #{inspect(reason)}"
+
+  defp personality do
+    :wajadi_engine
+    |> Application.get_env(:ai_agent, [])
+    |> Keyword.get(:personality, @default_personality)
+  end
 end
