@@ -35,6 +35,14 @@ env_string = fn name, default ->
   end
 end
 
+product_image_allowed_hosts =
+  System.get_env("PRODUCT_IMAGE_ALLOWED_HOSTS", "")
+  |> String.split(",", trim: true)
+  |> Enum.map(&String.trim/1)
+  |> Enum.reject(&(&1 == ""))
+
+config :wajadi_engine, :product_image_allowed_hosts, product_image_allowed_hosts
+
 config :wajadi_engine, :ai,
   nine_router_base_url: env_string.("NINE_ROUTER_BASE_URL", "http://localhost:20128/v1"),
   nine_router_api_key: env_string.("NINE_ROUTER_API_KEY", "dummy-key"),

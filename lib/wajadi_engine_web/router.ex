@@ -8,6 +8,26 @@ defmodule WajadiEngineWeb.Router do
   scope "/api", WajadiEngineWeb do
     pipe_through :api
 
+    scope "/account/:account_id" do
+      get "/stores", AccountController, :index_stores
+      post "/stores", AccountController, :create_store
+      patch "/stores/:store_id", AccountController, :update_store
+      delete "/stores/:store_id", AccountController, :archive_store
+      post "/stores/:store_id/restore", AccountController, :restore_store
+
+      get "/stores/:store_id/personality", AccountController, :show_personality
+      put "/stores/:store_id/personality", AccountController, :upsert_personality
+
+      get "/stores/:store_id/products", AccountController, :index_products
+      post "/stores/:store_id/products", AccountController, :create_product
+      patch "/stores/:store_id/products/:id", AccountController, :update_product
+      delete "/stores/:store_id/products/:id", AccountController, :archive_product
+
+      patch "/sessions/:session_id/store", AccountController, :move_session
+      post "/sessions/:session_id/restore", AccountController, :restore_session
+      delete "/sessions/:session_id", AccountController, :archive_session
+    end
+
     scope "/whatsapp" do
       get "/account/:user_id/list", WhatsAppController, :list
       post "/account/:user_id/create", WhatsAppController, :create
