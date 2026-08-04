@@ -9,11 +9,17 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
 
   alias Amarula.Address
   alias WajadiEngine.AI.Agent
+  alias WajadiEngine.ProductCatalog
   alias WajadiEngine.WhatsApp
   alias WajadiEngine.WhatsApp.Helpers
   alias WajadiEngine.WhatsApp.TerminalQR
 
   @registry WajadiEngine.WhatsApp.SessionRegistry
+  # Diagnostic target matching the sender PN used by the previous successful test.
+  @ping_target "6282111096953@s.whatsapp.net"
+  @product_image_receive_timeout 15_000
+  @product_image_connect_timeout 5_000
+  @max_product_image_bytes 10 * 1024 * 1024
 
   defstruct [
     :user_id,
@@ -429,7 +435,10 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
 
   defp send_media_result(state, jid, type, data, opts) do
     if connected_connection?(state) do
-      Helpers.send_media(Amarula.via(state.session_id), jid, type, data, opts)
+      case type do
+        :image -> Helpers.send_image(connection_pid(state), jid, data, opts)
+        _type -> Helpers.send_media(Amarula.via(state.session_id), jid, type, data, opts)
+      end
     else
       {:error, :not_connected}
     end
@@ -486,10 +495,40 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
          true <- session.status == "connected",
          true <- connected_connection?(state),
          {:ok, target_jid} <- reply_target(message) do
-      start_ai_reply(state, target_jid, body)
+      cond do
+        ping_message?(body) -> start_ping_reply(state)
+        product_image_reply_available?(body) -> start_product_image_reply(state, target_jid, body)
+        true -> start_ai_reply(state, target_jid, body)
+      end
     else
       _skip -> :ok
     end
+  end
+
+  defp start_ping_reply(%{ai_async?: true} = state) do
+    case Task.Supervisor.start_child(WajadiEngine.TaskSupervisor, fn ->
+           run_direct_reply(state, @ping_target, "pong")
+         end) do
+      {:ok, _pid} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("WhatsApp ping reply task start failed",
+          session_id: state.session_id,
+          reason: safe_reason(reason)
+        )
+    end
+  end
+
+  defp start_ping_reply(state), do: run_direct_reply(state, @ping_target, "pong")
+
+  defp run_direct_reply(state, target_jid, reply) do
+    result = send_text_result(state, target_jid, reply, [])
+    log_outgoing_message(state, target_jid, reply, "text", result)
+  end
+
+  defp ping_message?(body) when is_binary(body) do
+    body |> String.trim() |> String.downcase() == "ping"
   end
 
   defp start_ai_reply(%{ai_async?: true} = state, target_jid, body) do
@@ -508,6 +547,125 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
   end
 
   defp start_ai_reply(state, target_jid, body), do: run_ai_reply(state, target_jid, body)
+
+  defp start_product_image_reply(%{ai_async?: true} = state, target_jid, body) do
+    case Task.Supervisor.start_child(WajadiEngine.TaskSupervisor, fn ->
+           run_product_image_reply(state, target_jid, body)
+         end) do
+      {:ok, _pid} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("WhatsApp product image reply task start failed",
+          session_id: state.session_id,
+          reason: safe_reason(reason)
+        )
+    end
+  end
+
+  defp start_product_image_reply(state, target_jid, body) do
+    run_product_image_reply(state, target_jid, body)
+  end
+
+  defp run_product_image_reply(state, target_jid, body) do
+    send_chatstate_best_effort(state, target_jid, :composing)
+
+    case product_image_reply(body) do
+      {:ok, product, image_url} ->
+        send_product_image_reply(state, target_jid, product, image_url)
+
+      :fallback ->
+        run_ai_reply(state, target_jid, body)
+    end
+  after
+    send_chatstate_best_effort(state, target_jid, :paused)
+  end
+
+  defp product_image_reply_available?(body), do: product_image_reply(body) != :fallback
+
+  defp product_image_reply(body) do
+    with true <- ProductCatalog.image_request?(body),
+         [product] <- ProductCatalog.search_products(body),
+         image_url when is_binary(image_url) <- ProductCatalog.product_image_url(product) do
+      {:ok, product, image_url}
+    else
+      _fallback -> :fallback
+    end
+  end
+
+  defp send_product_image_reply(state, target_jid, product, image_url) do
+    caption = ProductCatalog.product_caption(product)
+
+    case fetch_product_image(image_url) do
+      {:ok, bytes} ->
+        result = send_media_result(state, target_jid, :image, bytes, caption: caption)
+        log_outgoing_message(state, target_jid, caption, "image", result)
+
+      {:error, reason} ->
+        Logger.warning("Product image fetch failed",
+          session_id: state.session_id,
+          reason: safe_reason(reason)
+        )
+
+        message = "Maaf, foto #{caption} belum bisa dikirim saat ini."
+        result = send_text_result(state, target_jid, message, [])
+        log_outgoing_message(state, target_jid, message, "text", result)
+    end
+  end
+
+  defp fetch_product_image("data:" <> _rest = data_url), do: decode_data_url(data_url)
+
+  defp fetch_product_image(url) when is_binary(url) do
+    case Req.get(url,
+           retry: false,
+           receive_timeout: @product_image_receive_timeout,
+           connect_options: [timeout: @product_image_connect_timeout],
+           into: &collect_product_image_chunk/2
+         ) do
+      {:ok, %{status: status, private: private}} when status in 200..299 ->
+        if Map.get(private, :wajadi_engine_product_image_too_large?, false) do
+          {:error, :product_image_too_large}
+        else
+          private
+          |> Map.get(:wajadi_engine_product_image_chunks, [])
+          |> Enum.reverse()
+          |> IO.iodata_to_binary()
+          |> then(&{:ok, &1})
+        end
+
+      {:ok, %{status: status}} ->
+        {:error, {:http_status, status}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp fetch_product_image(_url), do: {:error, :missing_product_image_url}
+
+  defp decode_data_url(data_url) do
+    case Regex.run(~r/^data:[^;]+;base64,(?<data>.+)$/s, data_url, capture: ["data"]) do
+      [data] -> Base.decode64(data)
+      nil -> {:error, :invalid_data_url}
+    end
+  end
+
+  defp collect_product_image_chunk({:data, data}, {request, response}) when is_binary(data) do
+    size = Map.get(response.private, :wajadi_engine_product_image_size, 0) + byte_size(data)
+
+    private =
+      response.private
+      |> Map.put(:wajadi_engine_product_image_size, size)
+      |> Map.update(:wajadi_engine_product_image_chunks, [data], &[data | &1])
+
+    response = %{response | private: private}
+
+    if size > @max_product_image_bytes do
+      {:halt, {request, put_in(response.private[:wajadi_engine_product_image_too_large?], true)}}
+    else
+      {:cont, {request, response}}
+    end
+  end
 
   defp run_ai_reply(state, target_jid, body) do
     send_chatstate_best_effort(state, target_jid, :composing)

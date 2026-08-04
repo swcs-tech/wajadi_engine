@@ -1,9 +1,10 @@
 defmodule WajadiEngine do
   @moduledoc """
-  WajadiEngine keeps the contexts that define your domain
-  and business logic.
+  WajadiEngine is an Elixir-powered WhatsApp session engine and AI integration platform.
 
-  Contexts are also responsible for managing your data, regardless
-  if it comes from the database, an external API or others.
+  ## Core Responsibilities
+  * **WhatsApp Integration**: Session management, auth state persistence, QR handling via Amarula.
+  * **AI Orchestration**: Automated responses using LangChain and product catalog context.
+  * **Persistence**: PostgreSQL storage for session data and outgoing/incoming logs.
   """
 end

@@ -1,20 +1,16 @@
 defmodule WajadiEngineWeb do
   @moduledoc """
-  The entrypoint for defining your web interface, such
-  as controllers, components, channels, and so on.
+  The entrypoint for defining web layer components in WajadiEngine.
 
-  This can be used in your application as:
+  Provides shared macros for controllers, router, and channels used
+  by the WhatsApp Engine HTTP API and webhook endpoints.
 
+  Usage in web modules:
       use WajadiEngineWeb, :controller
-      use WajadiEngineWeb, :html
+      use WajadiEngineWeb, :router
 
-  The definitions below will be executed for every controller,
-  component, etc, so keep them short and clean, focused
-  on imports, uses and aliases.
-
-  Do NOT define functions inside the quoted expressions
-  below. Instead, define additional modules and import
-  those modules here.
+  Keep macros in this module focused purely on imports, aliases, and common
+  plugs required across all web endpoints.
   """
 
   def static_paths, do: ~w(assets fonts images favicon.ico robots.txt)
@@ -38,8 +34,6 @@ defmodule WajadiEngineWeb do
   def controller do
     quote do
       use Phoenix.Controller, formats: [:html, :json]
-
-      use Gettext, backend: WajadiEngineWeb.Gettext
 
       import Plug.Conn
 

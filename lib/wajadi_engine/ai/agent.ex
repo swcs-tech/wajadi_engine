@@ -26,6 +26,8 @@ defmodule WajadiEngine.AI.Agent do
   Aplikasi akan mengirim final reply kamu tepat satu kali ke user.
   Jangan mencoba mengirim pesan sendiri melalui tool.
   Jika user bertanya produk, menu, katalog, product list, stok, harga, atau barang yang dijual, gunakan tool get_product_list.
+  Untuk pertanyaan katalog umum seperti "Ada produk apa saja?", panggil tool tanpa query.
+  Untuk product spesifik, isi query hanya dengan nama atau deskripsi product yang sudah kamu pahami dari bahasa natural user.
   Jika data tidak tersedia di tool atau prompt, katakan belum tersedia.
   """
 
@@ -120,13 +122,28 @@ defmodule WajadiEngine.AI.Agent do
     Function.new!(%{
       name: "get_product_list",
       description:
-        "Read-only. Returns current product list, prices, stock, and descriptions for product/menu/catalog questions.",
+        "Read-only. Returns current product catalog as structured JSON with product IDs, prices, stock quantities, descriptions, and image URLs. Use optional query after interpreting the customer's natural-language request.",
       parameters_schema: %{
         type: "object",
-        properties: %{},
+        properties: %{
+          query: %{
+            type: "string",
+            description:
+              "Product name or concise product description extracted from the customer's request"
+          }
+        },
         required: []
       },
-      function: fn _arguments, _context -> {:ok, ProductCatalog.format_products()} end
+      function: fn arguments, _context ->
+        products = ProductCatalog.search_products(Map.get(arguments, "query"))
+        Logger.debug("Product catalog lookup returned #{length(products)} products")
+
+        {
+          :ok,
+          ProductCatalog.encode_products(products),
+          ProductCatalog.structured_products(products)
+        }
+      end
     })
   end
 

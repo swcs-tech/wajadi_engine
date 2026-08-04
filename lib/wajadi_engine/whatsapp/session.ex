@@ -3,12 +3,17 @@ defmodule WajadiEngine.WhatsApp.Session do
 
   import Ecto.Changeset
 
+  alias WajadiEngine.Accounts.Account
+  alias WajadiEngine.Stores.Store
+
   @statuses ~w(connecting qr connected disconnected paused)
 
   @type status :: String.t()
 
   @type t :: %__MODULE__{
           id: integer() | nil,
+          account_id: integer() | nil,
+          store_id: integer() | nil,
           user_id: String.t() | nil,
           session_id: String.t() | nil,
           phone_number: String.t() | nil,
@@ -18,11 +23,16 @@ defmodule WajadiEngine.WhatsApp.Session do
           last_connected_at: DateTime.t() | nil,
           last_disconnected_at: DateTime.t() | nil,
           last_qr_at: DateTime.t() | nil,
+          archived_at: DateTime.t() | nil,
+          purge_at: DateTime.t() | nil,
           inserted_at: DateTime.t() | nil,
           updated_at: DateTime.t() | nil
         }
 
   schema "wa_sessions" do
+    belongs_to :account, Account
+    belongs_to :store, Store
+
     field :user_id, :string
     field :session_id, :string
     field :phone_number, :string
@@ -32,6 +42,8 @@ defmodule WajadiEngine.WhatsApp.Session do
     field :last_connected_at, :utc_datetime_usec
     field :last_disconnected_at, :utc_datetime_usec
     field :last_qr_at, :utc_datetime_usec
+    field :archived_at, :utc_datetime_usec
+    field :purge_at, :utc_datetime_usec
 
     timestamps(type: :utc_datetime_usec)
   end
@@ -51,11 +63,16 @@ defmodule WajadiEngine.WhatsApp.Session do
       :is_active,
       :last_connected_at,
       :last_disconnected_at,
-      :last_qr_at
+      :last_qr_at,
+      :account_id,
+      :store_id
     ])
-    |> validate_required([:user_id, :session_id, :status, :is_active])
+    |> validate_required([:account_id, :store_id, :user_id, :session_id, :status, :is_active])
     |> validate_inclusion(:status, @statuses)
     |> unique_constraint(:session_id)
+    |> unique_constraint(:store_id, name: :wa_sessions_one_non_archived_session_per_store_index)
+    |> foreign_key_constraint(:account_id)
+    |> foreign_key_constraint(:store_id)
     |> check_constraint(:status, name: :wa_sessions_status_check)
   end
 
@@ -69,10 +86,41 @@ defmodule WajadiEngine.WhatsApp.Session do
       :is_active,
       :last_connected_at,
       :last_disconnected_at,
-      :last_qr_at
+      :last_qr_at,
+      :archived_at,
+      :purge_at
     ])
     |> validate_required([:status, :is_active])
     |> validate_inclusion(:status, @statuses)
+    |> validate_archive_window()
     |> check_constraint(:status, name: :wa_sessions_status_check)
+    |> check_constraint(:purge_at, name: :wa_sessions_archive_window_check)
+  end
+
+  defp validate_archive_window(changeset) do
+    archived_at = get_field(changeset, :archived_at)
+    purge_at = get_field(changeset, :purge_at)
+
+    case {archived_at, purge_at} do
+      {nil, nil} ->
+        changeset
+
+      {%DateTime{} = archived_at, %DateTime{} = purge_at} ->
+        validate_purge_after_archive(changeset, archived_at, purge_at)
+
+      {nil, %DateTime{}} ->
+        add_error(changeset, :archived_at, "must be set when purge_at is set")
+
+      {%DateTime{}, nil} ->
+        add_error(changeset, :purge_at, "must be set when archived_at is set")
+    end
+  end
+
+  defp validate_purge_after_archive(changeset, archived_at, purge_at) do
+    if DateTime.compare(purge_at, archived_at) == :gt do
+      changeset
+    else
+      add_error(changeset, :purge_at, "must be after archived_at")
+    end
   end
 end

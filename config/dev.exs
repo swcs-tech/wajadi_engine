@@ -66,12 +66,34 @@ config :wajadi_engine, :ai_agent,
   Jika informasi belum tersedia, katakan belum tahu dan tawarkan bantuan lanjutan.
   """
 
-# Langchain postgres product table
+# Mock product catalog until database table is available
 config :wajadi_engine, :product_catalog,
   products: [
-    %{name: "Kopi Arabica 250g", price: "Rp75.000", stock: "ready"},
-    %{name: "Kopi Robusta 250g", price: "Rp55.000", stock: "ready"},
-    %{name: "Drip Bag Coffee 10 pcs", price: "Rp60.000", stock: "ready"}
+    %{
+      id: "kopi-arabica-250g",
+      name: "Kopi Arabica 250g",
+      price: 75_000,
+      currency: "IDR",
+      stock_quantity: 10,
+      description: "Rasa fruity dengan acidity ringan.",
+      image_url: "https://pub-5d68f1fcb9ee47fcb3952ef6a2d5f2d5.r2.dev/store/product/arabica.jpg"
+    },
+    %{
+      id: "kopi-robusta-250g",
+      name: "Kopi Robusta 250g",
+      price: 55_000,
+      currency: "IDR",
+      stock_quantity: 8,
+      description: "Body kuat dengan rasa cokelat dan pahit seimbang."
+    },
+    %{
+      id: "drip-bag-coffee-10-pcs",
+      name: "Drip Bag Coffee 10 pcs",
+      price: 60_000,
+      currency: "IDR",
+      stock_quantity: 5,
+      description: "Praktis untuk seduh kopi tanpa alat espresso."
+    }
   ]
 
 # Do not include metadata nor timestamps in development logs

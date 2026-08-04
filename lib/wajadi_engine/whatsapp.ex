@@ -5,7 +5,10 @@ defmodule WajadiEngine.WhatsApp do
 
   import Ecto.Query
 
+  alias Ecto.Multi
+  alias WajadiEngine.Accounts.Account
   alias WajadiEngine.Repo
+  alias WajadiEngine.Stores.Store
   alias WajadiEngine.WhatsApp.AuthState
   alias WajadiEngine.WhatsApp.ChatHistory
   alias WajadiEngine.WhatsApp.Session
@@ -26,25 +29,50 @@ defmodule WajadiEngine.WhatsApp do
   @spec create_session(String.t(), map()) :: {:ok, Session.t()} | {:error, Ecto.Changeset.t()}
   def create_session(user_id, attrs \\ %{}) when is_binary(user_id) and is_map(attrs) do
     attrs = normalize_attrs(attrs, session_fields())
-    session_id = session_id_from(attrs) || generate_session_id(user_id)
-    attrs = Map.merge(attrs, %{user_id: user_id, session_id: session_id})
+    normalized_user_id = normalize_user_id(user_id)
+    session_id = session_id_from(attrs) || generate_session_id(normalized_user_id)
+    attrs = Map.merge(attrs, %{user_id: normalized_user_id, session_id: session_id})
 
-    %Session{}
-    |> Session.create_changeset(attrs)
-    |> Repo.insert()
+    Multi.new()
+    |> Multi.run(:account, fn repo, _changes ->
+      get_or_create_account(repo, normalized_user_id)
+    end)
+    |> Multi.insert(:store, fn %{account: account} ->
+      Store.create_changeset(%Store{}, account, %{
+        name: default_store_name(session_id),
+        status: "active"
+      })
+    end)
+    |> Multi.insert(:session, fn %{account: account, store: store} ->
+      Session.create_changeset(
+        %Session{},
+        Map.merge(attrs, %{account_id: account.id, store_id: store.id})
+      )
+    end)
+    |> Repo.transaction()
+    |> case do
+      {:ok, %{session: session}} -> {:ok, session}
+      {:error, _operation, reason, _changes} -> {:error, reason}
+    end
   end
 
   @spec list_sessions(String.t()) :: [Session.t()]
   def list_sessions(user_id) when is_binary(user_id) do
+    user_id = normalize_user_id(user_id)
+
     Session
     |> where([session], session.user_id == ^user_id)
+    |> where([session], is_nil(session.archived_at))
     |> order_by([session], desc: session.inserted_at)
     |> Repo.all()
   end
 
   @spec get_session(String.t()) :: Session.t() | nil
   def get_session(session_id) when is_binary(session_id) do
-    Repo.get_by(Session, session_id: session_id)
+    Session
+    |> where([session], session.session_id == ^session_id)
+    |> where([session], is_nil(session.archived_at))
+    |> Repo.one()
   end
 
   @spec fetch_session(String.t()) :: {:ok, Session.t()} | {:error, :not_found}
@@ -59,7 +87,14 @@ defmodule WajadiEngine.WhatsApp do
           {:ok, Session.t()} | {:error, :not_found}
   def fetch_session_for_user(user_id, session_id)
       when is_binary(user_id) and is_binary(session_id) do
-    case Repo.get_by(Session, user_id: user_id, session_id: session_id) do
+    session =
+      Session
+      |> where([session], session.user_id == ^normalize_user_id(user_id))
+      |> where([session], session.session_id == ^session_id)
+      |> where([session], is_nil(session.archived_at))
+      |> Repo.one()
+
+    case session do
       %Session{} = session -> {:ok, session}
       nil -> {:error, :not_found}
     end
@@ -74,6 +109,7 @@ defmodule WajadiEngine.WhatsApp do
           auth_state.key == "creds"
     )
     |> where([session, _auth_state], session.status != "paused")
+    |> where([session, _auth_state], is_nil(session.archived_at))
     |> order_by([session], asc: session.inserted_at)
     |> Repo.all()
   end
@@ -151,6 +187,7 @@ defmodule WajadiEngine.WhatsApp do
       attrs
       |> normalize_attrs(chat_history_fields())
       |> Map.put_new(:type, "text")
+      |> put_chat_history_store_id()
 
     %ChatHistory{}
     |> ChatHistory.create_changeset(attrs)
@@ -216,6 +253,54 @@ defmodule WajadiEngine.WhatsApp do
     |> Repo.update()
   end
 
+  defp get_or_create_account(repo, email) do
+    changeset = Account.create_changeset(%Account{}, %{email: email})
+
+    if changeset.valid? do
+      do_get_or_create_account(repo, Ecto.Changeset.get_change(changeset, :email))
+    else
+      {:error, changeset}
+    end
+  end
+
+  defp do_get_or_create_account(repo, email) do
+    timestamp = now()
+
+    repo.insert_all(
+      Account,
+      [%{email: email, inserted_at: timestamp, updated_at: timestamp}],
+      on_conflict: :nothing,
+      conflict_target: :email
+    )
+
+    case repo.get_by(Account, email: email) do
+      %Account{} = account -> {:ok, account}
+      nil -> {:error, :account_not_found}
+    end
+  end
+
+  defp put_chat_history_store_id(%{store_id: store_id} = attrs) when is_integer(store_id),
+    do: attrs
+
+  defp put_chat_history_store_id(%{session_id: session_id} = attrs) when is_binary(session_id) do
+    session =
+      Session
+      |> where([session], session.session_id == ^session_id)
+      |> where([session], is_nil(session.archived_at))
+      |> Repo.one()
+
+    case session do
+      %Session{store_id: store_id} -> Map.put(attrs, :store_id, store_id)
+      nil -> attrs
+    end
+  end
+
+  defp put_chat_history_store_id(attrs), do: attrs
+
+  defp default_store_name(session_id), do: "Store for #{session_id}"
+
+  defp normalize_user_id(user_id), do: Account.normalize_email(user_id)
+
   defp session_id_from(attrs) do
     Map.get(attrs, :session_id)
   end
@@ -246,7 +331,7 @@ defmodule WajadiEngine.WhatsApp do
   end
 
   defp chat_history_fields do
-    [:session_id, :from, :to, :from_me, :body, :type, :status, :error]
+    [:store_id, :session_id, :from, :to, :from_me, :body, :type, :status, :error]
   end
 
   defp auth_state_fields do

@@ -4,6 +4,7 @@ defmodule WajadiEngine.WhatsApp.Helpers do
   """
 
   alias Amarula.Address
+  alias Amarula.Connection
   alias Amarula.Content.Media
   alias Amarula.Msg
 
@@ -68,6 +69,11 @@ defmodule WajadiEngine.WhatsApp.Helpers do
   def send_media(conn, jid, type, data, opts \\ [])
       when is_binary(jid) and is_binary(data) do
     Amarula.send_media(conn, format_to_jid(jid), type, data, opts)
+  end
+
+  @spec send_image(Amarula.conn(), String.t(), binary(), keyword()) :: Amarula.send_result()
+  def send_image(conn, jid, data, opts \\ []) when is_binary(jid) and is_binary(data) do
+    Connection.send_image(conn, format_to_jid(jid), data, opts)
   end
 
   @spec send_reply(Amarula.conn(), String.t(), String.t(), Msg.t(), keyword()) ::

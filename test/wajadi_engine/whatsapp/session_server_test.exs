@@ -197,6 +197,40 @@ defmodule WajadiEngine.WhatsApp.SessionServerTest do
       assert chat_history.status == "received"
     end
 
+    test "ping skips AI and logs sent pong to hardcoded PN" do
+      session_id = unique_session_id()
+      assert {:ok, session} = WhatsApp.create_session("user-1", %{session_id: session_id})
+      assert {:ok, _session} = WhatsApp.mark_session_connected(session)
+
+      assert {:ok, pid} =
+               SessionSupervisor.start_session(session.user_id, session.session_id,
+                 connect: false,
+                 ai_agent: WajadiEngine.FakeAI.SuccessAgent,
+                 ai_async?: false,
+                 amarula_config: offline_config()
+               )
+
+      on_exit(fn -> SessionSupervisor.stop_session(session.session_id) end)
+
+      assert {:ok, _conn_pid} = SessionServer.connect(pid)
+      assert {:ok, session} = WhatsApp.fetch_session(session.session_id)
+      assert {:ok, _session} = WhatsApp.mark_session_connected(session)
+
+      send(pid, {:amarula, :messages_upsert, %{messages: [text_msg(content: "  PING  ")]}})
+      :sys.get_state(pid)
+
+      assert [incoming, outgoing] = chat_histories(session.session_id)
+      assert incoming.from_me == false
+      assert incoming.body == "  PING  "
+      assert incoming.status == "received"
+      assert outgoing.from_me == true
+      assert outgoing.to == "6282111096953@s.whatsapp.net"
+      assert outgoing.body == "pong"
+      assert outgoing.type == "text"
+      assert outgoing.status == "sent"
+      assert outgoing.error == nil
+    end
+
     test "incoming from_me messages are skipped" do
       session_id = unique_session_id()
       assert {:ok, session} = WhatsApp.create_session("user-1", %{session_id: session_id})
@@ -317,6 +351,54 @@ defmodule WajadiEngine.WhatsApp.SessionServerTest do
       assert outgoing.status == "sent"
     end
 
+    test "product image request sends image media when one matching product has image URL" do
+      with_product_catalog([
+        %{
+          id: "kopi-arabica-250g",
+          name: "Kopi Arabica 250g",
+          price: 75_000,
+          currency: "IDR",
+          stock_quantity: 10,
+          description: "Rasa fruity dengan acidity ringan.",
+          image_url: "data:image/jpeg;base64,AAEC"
+        }
+      ])
+
+      session_id = unique_session_id()
+      assert {:ok, session} = WhatsApp.create_session("user-1", %{session_id: session_id})
+      assert {:ok, _session} = WhatsApp.mark_session_connected(session)
+
+      assert {:ok, pid} =
+               SessionSupervisor.start_session(session.user_id, session.session_id,
+                 connect: false,
+                 ai_agent: WajadiEngine.FakeAI.SuccessAgent,
+                 ai_async?: false,
+                 amarula_config: offline_config()
+               )
+
+      on_exit(fn -> SessionSupervisor.stop_session(session.session_id) end)
+
+      assert {:ok, _conn_pid} = SessionServer.connect(pid)
+      assert {:ok, session} = WhatsApp.fetch_session(session.session_id)
+      assert {:ok, _session} = WhatsApp.mark_session_connected(session)
+
+      send(
+        pid,
+        {:amarula, :messages_upsert,
+         %{messages: [text_msg(content: "Apakah ada foto kopi arabica?")]}}
+      )
+
+      :sys.get_state(pid)
+
+      assert [incoming, outgoing] = chat_histories(session.session_id)
+      assert incoming.from_me == false
+      assert incoming.body == "Apakah ada foto kopi arabica?"
+      assert outgoing.from_me == true
+      assert outgoing.type == "image"
+      assert outgoing.body =~ "Kopi Arabica 250g"
+      assert outgoing.status in ["sent", "failed"]
+    end
+
     test "AI error keeps session process alive and skips outgoing reply" do
       session_id = unique_session_id()
       assert {:ok, session} = WhatsApp.create_session("user-1", %{session_id: session_id})
@@ -435,6 +517,13 @@ defmodule WajadiEngine.WhatsApp.SessionServerTest do
           name: "Test Bot"
         })
     }
+  end
+
+  defp with_product_catalog(products) do
+    original = Application.get_env(:wajadi_engine, :product_catalog)
+
+    Application.put_env(:wajadi_engine, :product_catalog, products: products)
+    on_exit(fn -> Application.put_env(:wajadi_engine, :product_catalog, original) end)
   end
 
   defp text_msg(opts) do

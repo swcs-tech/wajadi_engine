@@ -1,6 +1,8 @@
 defmodule WajadiEngine.AI.AgentTest do
   use WajadiEngine.DataCase
 
+  @arabica_image_url "https://pub-5d68f1fcb9ee47fcb3952ef6a2d5f2d5.r2.dev/store/product/arabica.jpg"
+
   alias Amarula.Protocol.Auth.AuthUtils
   alias WajadiEngine.AI
   alias WajadiEngine.AI.Agent
@@ -40,11 +42,36 @@ defmodule WajadiEngine.AI.AgentTest do
     test "get_product_list returns configured products" do
       tool = tool!("get_product_list")
 
-      assert {:ok, message} = tool.function.(%{}, %{})
+      assert {:ok, message, processed_content} = tool.function.(%{}, %{})
+      assert %{"products" => products, "total" => 3} = Jason.decode!(message)
 
-      assert message =~ "Produk Test"
-      assert message =~ "Rp10.000"
-      assert message =~ "ready"
+      assert Enum.any?(products, fn product ->
+               product["id"] == "kopi-arabica-250g" and
+                 product["image_url"] == @arabica_image_url
+             end)
+
+      assert processed_content.total == 3
+      assert Enum.any?(processed_content.products, &(&1.id == "kopi-arabica-250g"))
+    end
+
+    test "get_product_list filters structured products by natural-language query" do
+      tool = tool!("get_product_list")
+
+      assert {:ok, message, %{products: [product], total: 1}} =
+               tool.function.(%{"query" => "Apakah ada foto kopi arabica?"}, %{})
+
+      assert product.id == "kopi-arabica-250g"
+      assert product.image_url == @arabica_image_url
+      assert %{"total" => 1} = Jason.decode!(message)
+    end
+
+    test "get_product_list keeps full catalog for a generic natural-language query" do
+      tool = tool!("get_product_list")
+
+      assert {:ok, message, %{total: 3}} =
+               tool.function.(%{"query" => "Ada produk apa saja min?"}, %{})
+
+      assert %{"total" => 3} = Jason.decode!(message)
     end
   end
 
@@ -110,8 +137,32 @@ defmodule WajadiEngine.AI.AgentTest do
   end
 
   describe "ProductCatalog" do
-    test "formats configured products" do
-      assert ProductCatalog.format_products() == "1. Produk Test - Rp10.000 - ready"
+    test "returns structured products with image URL" do
+      assert %{products: products, total: 3} =
+               ProductCatalog.structured_products(ProductCatalog.list_products())
+
+      assert %{id: "kopi-arabica-250g", image_url: @arabica_image_url} =
+               Enum.find(products, &(&1.id == "kopi-arabica-250g"))
+    end
+
+    test "formats structured products for WhatsApp text" do
+      formatted = ProductCatalog.format_products()
+
+      assert formatted =~
+               "1. Kopi Arabica 250g - Rp75.000 - Stok: tersedia - Rasa fruity dengan acidity ringan."
+    end
+
+    test "ignores generic words when searching natural-language catalog requests" do
+      products = ProductCatalog.search_products("Ada produk apa saja min?")
+
+      assert %{total: 3} = ProductCatalog.structured_products(products)
+    end
+
+    test "ignores image-request words when searching product image requests" do
+      products = ProductCatalog.search_products("Apakah ada foto kopi arabica?")
+
+      assert %{products: [%{id: "kopi-arabica-250g"}], total: 1} =
+               ProductCatalog.structured_products(products)
     end
   end
 

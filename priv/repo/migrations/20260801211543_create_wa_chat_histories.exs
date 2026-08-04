@@ -3,6 +3,7 @@ defmodule WajadiEngine.Repo.Migrations.CreateWaChatHistories do
 
   def change do
     create table(:wa_chat_histories) do
+      add :store_id, references(:stores, on_delete: :restrict), null: false
       add :session_id, :text, null: false
       add :from, :text, null: false
       add :to, :text, null: false
@@ -15,7 +16,15 @@ defmodule WajadiEngine.Repo.Migrations.CreateWaChatHistories do
       timestamps(type: :utc_datetime_usec)
     end
 
+    create index(:wa_chat_histories, [:store_id, "inserted_at DESC"],
+             name: :wa_chat_histories_store_inserted_at_index
+           )
+
     create index(:wa_chat_histories, [:session_id], name: :wa_chat_histories_session_id_index)
+
+    create index(:wa_chat_histories, [:session_id, "inserted_at DESC"],
+             name: :wa_chat_histories_session_inserted_at_index
+           )
 
     create index(:wa_chat_histories, [:session_id, :from, "inserted_at DESC"],
              name: :wa_chat_histories_session_from_inserted_at_index

@@ -2,14 +2,76 @@ defmodule WajadiEngine.WhatsAppTest do
   use WajadiEngine.DataCase
 
   alias WajadiEngine.Repo
+  alias WajadiEngine.Accounts.Account
+  alias WajadiEngine.Stores.Store
   alias WajadiEngine.WhatsApp
   alias WajadiEngine.WhatsApp.AuthState
+  alias WajadiEngine.WhatsApp.Session
+
+  describe "accounts" do
+    test "normalizes account email before unique checks" do
+      assert {:ok, first} =
+               WhatsApp.create_session(" Owner@Example.COM ", %{session_id: "session-1"})
+
+      assert {:ok, second} =
+               WhatsApp.create_session("owner@example.com", %{session_id: "session-2"})
+
+      assert first.user_id == "owner@example.com"
+      assert second.user_id == "owner@example.com"
+      assert Repo.aggregate(Account, :count) == 1
+    end
+
+    test "database rejects duplicate normalized account email" do
+      attrs = %{email: "Owner@Example.COM"}
+      assert {:ok, _account} = %Account{} |> Account.create_changeset(attrs) |> Repo.insert()
+
+      assert {:error, changeset} =
+               %Account{}
+               |> Account.create_changeset(%{email: " owner@example.com "})
+               |> Repo.insert()
+
+      assert %{email: ["has already been taken"]} = errors_on(changeset)
+    end
+
+    test "rejects blank account identity without inserting account rows" do
+      assert {:error, changeset} = WhatsApp.create_session(" ", %{session_id: "session-1"})
+
+      assert %{email: ["can't be blank"]} = errors_on(changeset)
+      assert Repo.aggregate(Account, :count) == 0
+    end
+  end
+
+  describe "stores" do
+    test "store requires an existing account" do
+      changeset =
+        Store.create_changeset(%Store{}, %Account{id: -1}, %{name: "Main Store", status: "active"})
+
+      assert {:error, changeset} = Repo.insert(changeset)
+      assert %{account_id: ["does not exist"]} = errors_on(changeset)
+    end
+
+    test "store validates archive purge window" do
+      assert {:ok, session} =
+               WhatsApp.create_session("owner@example.com", %{session_id: "session-1"})
+
+      store = Repo.get!(Store, session.store_id)
+      now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+      before_archive = DateTime.add(now, -1, :second)
+
+      changeset = Store.update_changeset(store, %{archived_at: now, purge_at: before_archive})
+
+      refute changeset.valid?
+      assert %{purge_at: ["must be after archived_at"]} = errors_on(changeset)
+    end
+  end
 
   describe "sessions" do
     test "creates a session with provided session_id" do
-      assert {:ok, session} = WhatsApp.create_session("user-1", %{session_id: "session-1"})
+      assert {:ok, session} = WhatsApp.create_session("User-1", %{session_id: "session-1"})
 
       assert session.user_id == "user-1"
+      assert is_integer(session.account_id)
+      assert is_integer(session.store_id)
       assert session.session_id == "session-1"
       assert session.status == "disconnected"
       assert session.is_active == false
@@ -125,32 +187,80 @@ defmodule WajadiEngine.WhatsAppTest do
 
       assert %{status: ["is invalid"]} = errors_on(changeset)
     end
+
+    test "database rejects two non-archived sessions for one store" do
+      assert {:ok, first} = WhatsApp.create_session("user-1", %{session_id: "session-1"})
+
+      assert {:error, changeset} =
+               %Session{}
+               |> Session.create_changeset(%{
+                 account_id: first.account_id,
+                 store_id: first.store_id,
+                 user_id: first.user_id,
+                 session_id: "session-2",
+                 status: "disconnected",
+                 is_active: false
+               })
+               |> Repo.insert()
+
+      assert %{store_id: ["has already been taken"]} = errors_on(changeset)
+    end
+
+    test "archived sessions do not block another session for the same store" do
+      assert {:ok, first} = WhatsApp.create_session("user-1", %{session_id: "session-1"})
+      archived_at = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+      purge_at = DateTime.add(archived_at, 90, :day)
+
+      assert {:ok, _archived} =
+               Session.update_changeset(first, %{archived_at: archived_at, purge_at: purge_at})
+               |> Repo.update()
+
+      assert {:ok, replacement} =
+               %Session{}
+               |> Session.create_changeset(%{
+                 account_id: first.account_id,
+                 store_id: first.store_id,
+                 user_id: first.user_id,
+                 session_id: "session-2",
+                 status: "disconnected",
+                 is_active: false
+               })
+               |> Repo.insert()
+
+      assert replacement.store_id == first.store_id
+    end
   end
 
   describe "chat histories" do
     test "incoming row stores from_me false and received status" do
+      assert {:ok, session} = WhatsApp.create_session("user-1", %{session_id: "session-1"})
+
       assert {:ok, chat_history} =
                WhatsApp.create_incoming_chat_history(%{
-                 session_id: "session-1",
+                 session_id: session.session_id,
                  from: "user@s.whatsapp.net",
                  to: "bot@s.whatsapp.net",
                  body: "hello"
                })
 
+      assert chat_history.store_id == session.store_id
       assert chat_history.from_me == false
       assert chat_history.status == "received"
       assert chat_history.type == "text"
     end
 
     test "outgoing row stores from_me true and sent or failed status" do
+      assert {:ok, session} = WhatsApp.create_session("user-1", %{session_id: "session-1"})
+
       base_attrs = %{
-        session_id: "session-1",
+        session_id: session.session_id,
         from: "bot@s.whatsapp.net",
         to: "user@s.whatsapp.net",
         body: "hello"
       }
 
       assert {:ok, sent_history} = WhatsApp.create_outgoing_chat_history(base_attrs)
+      assert sent_history.store_id == session.store_id
       assert sent_history.from_me == true
       assert sent_history.status == "sent"
 
@@ -160,6 +270,7 @@ defmodule WajadiEngine.WhatsAppTest do
                |> WhatsApp.create_outgoing_chat_history()
 
       assert failed_history.from_me == true
+      assert failed_history.store_id == session.store_id
       assert failed_history.status == "failed"
       assert failed_history.error == "send failed"
     end

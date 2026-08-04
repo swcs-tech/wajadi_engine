@@ -50,9 +50,7 @@ defmodule WajadiEngine.MixProject do
       {:langchain, "~> 0.9"},
       {:ecto_psql_extras, "~> 0.8.8"},
       {:ex_slop, "~> 0.1", only: [:dev, :test], runtime: false},
-      {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
-      # Amarula's constraint resolves to protobuf 0.15.0, affected by CVE-2026-54451.
-      {:protobuf, "~> 0.17.0", override: true}
+      {:credo, "~> 1.7", only: [:dev, :test], runtime: false}
     ]
   end
 
