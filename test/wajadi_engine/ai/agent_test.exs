@@ -22,18 +22,18 @@ defmodule WajadiEngine.AI.AgentTest do
         endpoint: "http://router.test/v1/chat/completions",
         api_key: "test-key",
         model: "test-model",
-        temperature: 0.2,
         receive_timeout: 12_000
       }
 
-      model = Agent.model(config: config)
+      model = Agent.model(config: config, temperature: 1.0)
 
       assert model.endpoint == "http://router.test/v1/chat/completions"
       assert model.api_key == "test-key"
       assert model.model == "test-model"
-      assert model.temperature == 0.2
+      assert model.temperature == 0.0
       assert model.receive_timeout == 12_000
       assert model.parallel_tool_calls == false
+      refute Map.has_key?(model, :top_p)
     end
   end
 
@@ -135,18 +135,22 @@ defmodule WajadiEngine.AI.AgentTest do
   end
 
   describe "system_prompt/2" do
-    test "includes store personality and final-reply safety policy" do
+    test "includes base prompt, bounded store personality, and final-reply safety policy" do
       session = session_fixture()
       account = Repo.get!(WajadiEngine.Accounts.Account, session.account_id)
+      long_personality = String.duplicate("Coffee specialist ", 200)
 
       assert {:ok, _personality} =
-               Stores.upsert_personality(account, session.store_id, %{prompt: "Coffee specialist"})
+               Stores.upsert_personality(account, session.store_id, %{prompt: long_personality})
 
       prompt = Agent.system_prompt(account.id, session.store_id)
 
+      assert prompt =~ "asisten WhatsApp"
+      assert prompt =~ "Gunakan hanya konteks toko tepercaya"
       assert prompt =~ "Coffee specialist"
       assert prompt =~ "final reply"
       assert prompt =~ "get_product_list"
+      assert String.length(prompt) < String.length(long_personality) + 2_000
     end
   end
 
@@ -225,6 +229,7 @@ defmodule WajadiEngine.AI.AgentTest do
       assert config.endpoint == "http://localhost:20128/v1/chat/completions"
       assert config.api_key == "dummy-key"
       assert config.model == "gpt-4o"
+      refute Map.has_key?(config, :temperature)
     end
   end
 

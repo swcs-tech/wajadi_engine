@@ -7,15 +7,13 @@ defmodule WajadiEngine.AI do
   @default_api_key "dummy-key"
   @default_model "gpt-4o"
   @default_receive_timeout 30_000
-  @default_temperature 0.7
 
   @type config :: %{
           base_url: String.t(),
           endpoint: String.t(),
           api_key: String.t(),
           model: String.t(),
-          receive_timeout: pos_integer(),
-          temperature: float()
+          receive_timeout: pos_integer()
         }
 
   @spec config() :: config()
@@ -38,8 +36,7 @@ defmodule WajadiEngine.AI do
         configured
         |> Keyword.get(:nine_router_model, @default_model)
         |> normalize_string(@default_model),
-      receive_timeout: Keyword.get(configured, :receive_timeout, @default_receive_timeout),
-      temperature: Keyword.get(configured, :temperature, @default_temperature)
+      receive_timeout: Keyword.get(configured, :receive_timeout, @default_receive_timeout)
     }
   end
 

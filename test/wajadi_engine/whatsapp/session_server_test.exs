@@ -8,6 +8,7 @@ defmodule WajadiEngine.WhatsApp.SessionServerTest do
   alias Amarula.Protocol.Auth.AuthUtils
   alias Amarula.Protocol.Proto
   alias WajadiEngine.Repo
+  alias WajadiEngine.Stores
   alias WajadiEngine.Stores.Product
   alias WajadiEngine.WhatsApp
   alias WajadiEngine.WhatsApp.AuthState
@@ -351,6 +352,47 @@ defmodule WajadiEngine.WhatsApp.SessionServerTest do
       assert outgoing.from_me == true
       assert outgoing.body == "AI reply to hello"
       assert outgoing.status == "sent"
+    end
+
+    test "runtime passes trusted current store context to AI after movement" do
+      receiver_name = WajadiEngine.FakeAI.ContextAgent.receiver_name()
+      Process.register(self(), receiver_name)
+      on_exit(fn -> if Process.whereis(receiver_name), do: Process.unregister(receiver_name) end)
+
+      session_id = unique_session_id()
+      assert {:ok, session} = WhatsApp.create_session("user-1", %{session_id: session_id})
+      account = Repo.get!(WajadiEngine.Accounts.Account, session.account_id)
+      assert {:ok, target_store} = Stores.create_store(account, %{name: "Target"})
+      assert {:ok, moved} = WhatsApp.move_session(account, session.session_id, target_store.id)
+      assert {:ok, _session} = WhatsApp.mark_session_connected(moved)
+
+      assert {:ok, pid} =
+               SessionSupervisor.start_session(session.user_id, session.session_id,
+                 connect: false,
+                 ai_agent: WajadiEngine.FakeAI.ContextAgent,
+                 ai_async?: false,
+                 amarula_config: offline_config()
+               )
+
+      on_exit(fn -> SessionSupervisor.stop_session(session.session_id) end)
+
+      assert {:ok, _conn_pid} = SessionServer.connect(pid)
+      assert {:ok, session} = WhatsApp.fetch_session(session.session_id)
+      assert {:ok, _session} = WhatsApp.mark_session_connected(session)
+      send(pid, {:amarula, :messages_upsert, %{messages: [text_msg(content: "hello")]}})
+      :sys.get_state(pid)
+
+      assert_receive {:ai_context, context, "hello"}
+
+      assert context == %{
+               account_id: account.id,
+               store_id: target_store.id,
+               session_id: session.session_id
+             }
+
+      assert [incoming, outgoing] = chat_histories(session.session_id)
+      assert incoming.store_id == target_store.id
+      assert outgoing.store_id == target_store.id
     end
 
     test "product image request sends image media when one matching product has image URL" do
