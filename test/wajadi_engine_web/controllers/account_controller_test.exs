@@ -9,6 +9,32 @@ defmodule WajadiEngineWeb.AccountControllerTest do
   alias WajadiEngine.WhatsApp
 
   describe "authentication" do
+    test "exposes account management routes" do
+      account_routes =
+        WajadiEngineWeb.Router.__routes__()
+        |> Enum.filter(&String.starts_with?(&1.path, "/api/account/:account_id"))
+        |> Enum.map(&{&1.verb, &1.path})
+        |> Enum.sort()
+
+      assert account_routes ==
+               [
+                 {:delete, "/api/account/:account_id/sessions/:session_id"},
+                 {:delete, "/api/account/:account_id/stores/:store_id"},
+                 {:delete, "/api/account/:account_id/stores/:store_id/products/:id"},
+                 {:get, "/api/account/:account_id/stores"},
+                 {:get, "/api/account/:account_id/stores/:store_id/personality"},
+                 {:get, "/api/account/:account_id/stores/:store_id/products"},
+                 {:patch, "/api/account/:account_id/sessions/:session_id/store"},
+                 {:patch, "/api/account/:account_id/stores/:store_id"},
+                 {:patch, "/api/account/:account_id/stores/:store_id/products/:id"},
+                 {:post, "/api/account/:account_id/sessions/:session_id/restore"},
+                 {:post, "/api/account/:account_id/stores"},
+                 {:post, "/api/account/:account_id/stores/:store_id/products"},
+                 {:post, "/api/account/:account_id/stores/:store_id/restore"},
+                 {:put, "/api/account/:account_id/stores/:store_id/personality"}
+               ]
+    end
+
     test "requires account principal header", %{conn: conn} do
       account = account_fixture()
 
@@ -18,7 +44,9 @@ defmodule WajadiEngineWeb.AccountControllerTest do
         |> json_response(401)
 
       assert response["success"] == false
+      assert response["status"] == "error"
       assert response["message"] == "Authentication required"
+      assert Map.has_key?(response, "error")
     end
 
     test "does not authorize from route account_id alone", %{conn: conn} do
@@ -50,6 +78,9 @@ defmodule WajadiEngineWeb.AccountControllerTest do
 
       assert [%{"id" => visible_id, "name" => "Visible"}] = list_response["data"]["stores"]
       assert visible_id == visible.id
+      assert list_response["success"] == true
+      assert list_response["status"] == "success"
+      assert list_response["message"] == "List of stores"
 
       create_response =
         build_conn()
@@ -227,6 +258,25 @@ defmodule WajadiEngineWeb.AccountControllerTest do
   end
 
   describe "session management" do
+    test "one account can own multiple stores and paired sessions", %{conn: conn} do
+      first = session_fixture("multi@example.com")
+      second = session_fixture("multi@example.com")
+      account = Repo.get!(WajadiEngine.Accounts.Account, first.account_id)
+
+      response =
+        conn
+        |> auth(account)
+        |> get(~p"/api/account/#{account.id}/stores")
+        |> json_response(200)
+
+      store_ids = Enum.map(response["data"]["stores"], & &1["id"])
+
+      assert first.account_id == second.account_id
+      assert first.store_id in store_ids
+      assert second.store_id in store_ids
+      assert first.store_id != second.store_id
+    end
+
     test "moves session into an owned unassigned store", %{conn: conn} do
       session = session_fixture("owner@example.com")
       account = Repo.get!(WajadiEngine.Accounts.Account, session.account_id)

@@ -388,6 +388,51 @@ defmodule WajadiEngine.WhatsAppTest do
       assert %{selected: 0, purged: 0, skipped: 0, failed: 0} =
                SessionCleanup.purge_once(now: ~U[2026-04-01 00:00:00.000000Z])
     end
+
+    test "purge skips restored sessions and preserves reassigned stores" do
+      assert {:ok, restored_candidate} =
+               WhatsApp.create_session("user-1", %{session_id: "restored-candidate"})
+
+      assert {:ok, reassigned_candidate} =
+               WhatsApp.create_session("user-1", %{session_id: "reassigned-candidate"})
+
+      assert {:ok, account} = WhatsApp.fetch_account("user-1")
+
+      assert {:ok, _archived} =
+               WhatsApp.archive_session(
+                 account,
+                 restored_candidate.session_id,
+                 ~U[2026-01-01 00:00:00.000000Z]
+               )
+
+      assert {:ok, restored} =
+               WhatsApp.restore_session(
+                 account,
+                 restored_candidate.session_id,
+                 ~U[2026-03-31 00:00:00.000000Z]
+               )
+
+      assert {:ok, archived_for_reassignment} =
+               WhatsApp.archive_session(
+                 account,
+                 reassigned_candidate.session_id,
+                 ~U[2026-01-01 00:00:00.000000Z]
+               )
+
+      assert {:ok, replacement} =
+               WhatsApp.create_session("user-1", %{
+                 session_id: "replacement",
+                 store_id: reassigned_candidate.store_id
+               })
+
+      assert %{selected: 1, purged: 1, skipped: 0, failed: 0} =
+               SessionCleanup.purge_once(now: ~U[2026-04-01 00:00:00.000000Z])
+
+      assert Repo.get(Session, restored.id)
+      refute Repo.get(Session, archived_for_reassignment.id)
+      assert Repo.get(Store, reassigned_candidate.store_id)
+      assert Repo.get(Session, replacement.id)
+    end
   end
 
   describe "chat histories" do
