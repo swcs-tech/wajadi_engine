@@ -3,10 +3,12 @@ defmodule WajadiEngine.WhatsAppTest do
 
   alias WajadiEngine.Repo
   alias WajadiEngine.Accounts.Account
+  alias WajadiEngine.Stores
   alias WajadiEngine.Stores.Store
   alias WajadiEngine.WhatsApp
   alias WajadiEngine.WhatsApp.AuthState
   alias WajadiEngine.WhatsApp.Session
+  alias WajadiEngine.WhatsApp.SessionCleanup
 
   describe "accounts" do
     test "normalizes account email before unique checks" do
@@ -190,13 +192,12 @@ defmodule WajadiEngine.WhatsAppTest do
 
     test "database rejects two non-archived sessions for one store" do
       assert {:ok, first} = WhatsApp.create_session("user-1", %{session_id: "session-1"})
+      account = Repo.get!(Account, first.account_id)
+      store = Repo.get!(Store, first.store_id)
 
       assert {:error, changeset} =
                %Session{}
-               |> Session.create_changeset(%{
-                 account_id: first.account_id,
-                 store_id: first.store_id,
-                 user_id: first.user_id,
+               |> Session.create_changeset(account, store, %{
                  session_id: "session-2",
                  status: "disconnected",
                  is_active: false
@@ -208,26 +209,184 @@ defmodule WajadiEngine.WhatsAppTest do
 
     test "archived sessions do not block another session for the same store" do
       assert {:ok, first} = WhatsApp.create_session("user-1", %{session_id: "session-1"})
+      assert {:ok, account} = WhatsApp.fetch_account("user-1")
       archived_at = DateTime.utc_now() |> DateTime.truncate(:microsecond)
-      purge_at = DateTime.add(archived_at, 90, :day)
-
-      assert {:ok, _archived} =
-               Session.update_changeset(first, %{archived_at: archived_at, purge_at: purge_at})
-               |> Repo.update()
+      assert {:ok, _archived} = WhatsApp.archive_session(account, first.session_id, archived_at)
 
       assert {:ok, replacement} =
-               %Session{}
-               |> Session.create_changeset(%{
-                 account_id: first.account_id,
-                 store_id: first.store_id,
-                 user_id: first.user_id,
+               WhatsApp.create_session("user-1", %{
                  session_id: "session-2",
-                 status: "disconnected",
-                 is_active: false
+                 store_id: first.store_id
                })
-               |> Repo.insert()
 
       assert replacement.store_id == first.store_id
+    end
+
+    test "creates a session using an owned unassigned store" do
+      account =
+        %Account{}
+        |> Account.create_changeset(%{email: "owner@example.com"})
+        |> Repo.insert!()
+
+      assert {:ok, store} = Stores.create_store(account, %{name: "Existing Store"})
+
+      assert {:ok, session} =
+               WhatsApp.create_session(account.email, %{
+                 session_id: "session-1",
+                 store_id: store.id
+               })
+
+      assert session.account_id == account.id
+      assert session.store_id == store.id
+      assert Repo.get!(Store, store.id).status == "active"
+    end
+
+    test "rejects another account's store during session creation" do
+      owner =
+        %Account{} |> Account.create_changeset(%{email: "owner@example.com"}) |> Repo.insert!()
+
+      assert {:ok, store} = Stores.create_store(owner, %{name: "Private Store"})
+
+      assert {:error, :store_not_available} =
+               WhatsApp.create_session("attacker@example.com", %{
+                 session_id: "session-1",
+                 store_id: store.id
+               })
+    end
+
+    test "moves a session within an account while preserving old chat snapshots" do
+      assert {:ok, session} = WhatsApp.create_session("user-1", %{session_id: "session-1"})
+      assert {:ok, account} = WhatsApp.fetch_account("user-1")
+      assert {:ok, target_store} = Stores.create_store(account, %{name: "Target"})
+
+      assert {:ok, old_history} = incoming_history(session.session_id, "before")
+
+      old_context = %{
+        account_id: session.account_id,
+        store_id: session.store_id,
+        session_id: session.session_id
+      }
+
+      assert {:ok, moved} = WhatsApp.move_session(account, session.session_id, target_store.id)
+      assert moved.store_id == target_store.id
+      assert {:ok, new_history} = incoming_history(session.session_id, "after")
+
+      assert {:ok, in_flight_reply} =
+               WhatsApp.create_outgoing_chat_history(old_context, %{
+                 from: "bot@s.whatsapp.net",
+                 to: "user@s.whatsapp.net",
+                 body: "reply from in-flight turn"
+               })
+
+      assert old_history.store_id == session.store_id
+      assert new_history.store_id == target_store.id
+      assert in_flight_reply.store_id == session.store_id
+      assert Repo.get!(Store, session.store_id).status == "unassigned"
+      assert Repo.get!(Store, target_store.id).status == "active"
+    end
+
+    test "rejects movement across accounts and into an occupied store" do
+      assert {:ok, session} = WhatsApp.create_session("user-1", %{session_id: "session-1"})
+      assert {:ok, occupied} = WhatsApp.create_session("user-1", %{session_id: "session-2"})
+      assert {:ok, _other} = WhatsApp.create_session("user-2", %{session_id: "session-3"})
+      assert {:ok, account} = WhatsApp.fetch_account("user-1")
+      assert {:ok, other_account} = WhatsApp.fetch_account("user-2")
+
+      assert {:error, :not_found} =
+               WhatsApp.move_session(other_account, session.session_id, occupied.store_id)
+
+      assert {:error, :store_occupied} =
+               WhatsApp.move_session(account, session.session_id, occupied.store_id)
+    end
+
+    test "archives session, clears auth, and restores without auth before deadline" do
+      assert {:ok, session} = WhatsApp.create_session("user-1", %{session_id: "session-1"})
+      assert {:ok, account} = WhatsApp.fetch_account("user-1")
+      assert {:ok, _auth} = create_creds(session.session_id)
+      archived_at = ~U[2026-01-01 00:00:00.000000Z]
+
+      assert {:ok, archived} = WhatsApp.archive_session(account, session.session_id, archived_at)
+      assert archived.status == "disconnected"
+      assert archived.is_active == false
+      assert archived.purge_at == ~U[2026-04-01 00:00:00.000000Z]
+      assert Repo.aggregate(AuthState, :count) == 0
+
+      assert {:error, :not_found} =
+               WhatsApp.fetch_session_for_account(account, session.session_id)
+
+      assert {:ok, ^archived} = WhatsApp.fetch_archived_session(account, session.session_id)
+
+      assert {:ok, restored} =
+               WhatsApp.restore_session(
+                 account,
+                 session.session_id,
+                 ~U[2026-03-31 00:00:00.000000Z]
+               )
+
+      assert restored.status == "disconnected"
+      assert restored.is_active == false
+      assert is_nil(restored.archived_at)
+      assert is_nil(restored.purge_at)
+      assert Repo.aggregate(AuthState, :count) == 0
+    end
+
+    test "rejects restore after purge deadline and when store is occupied" do
+      assert {:ok, expired} = WhatsApp.create_session("user-1", %{session_id: "expired"})
+      assert {:ok, account} = WhatsApp.fetch_account("user-1")
+      archived_at = ~U[2026-01-01 00:00:00.000000Z]
+      assert {:ok, _archived} = WhatsApp.archive_session(account, expired.session_id, archived_at)
+
+      assert {:error, :purge_deadline_passed} =
+               WhatsApp.restore_session(
+                 account,
+                 expired.session_id,
+                 ~U[2026-04-01 00:00:00.000000Z]
+               )
+
+      assert {:ok, _replacement} =
+               WhatsApp.create_session("user-1", %{
+                 session_id: "replacement",
+                 store_id: expired.store_id
+               })
+
+      assert {:error, :store_occupied} =
+               WhatsApp.restore_session(
+                 account,
+                 expired.session_id,
+                 ~U[2026-03-01 00:00:00.000000Z]
+               )
+    end
+
+    test "purges only expired archives and defensively clears auth" do
+      assert {:ok, expired} = WhatsApp.create_session("user-1", %{session_id: "expired"})
+      assert {:ok, retained} = WhatsApp.create_session("user-1", %{session_id: "retained"})
+      assert {:ok, account} = WhatsApp.fetch_account("user-1")
+
+      assert {:ok, _expired} =
+               WhatsApp.archive_session(
+                 account,
+                 expired.session_id,
+                 ~U[2026-01-01 00:00:00.000000Z]
+               )
+
+      assert {:ok, _retained} =
+               WhatsApp.archive_session(
+                 account,
+                 retained.session_id,
+                 ~U[2026-03-01 00:00:00.000000Z]
+               )
+
+      assert {:ok, _orphaned_auth} = create_creds(expired.session_id)
+
+      assert %{selected: 1, purged: 1, skipped: 0, failed: 0} =
+               SessionCleanup.purge_once(now: ~U[2026-04-01 00:00:00.000000Z])
+
+      refute Repo.get(Session, expired.id)
+      assert Repo.get(Session, retained.id)
+      refute Repo.get_by(AuthState, session_id: expired.session_id)
+
+      assert %{selected: 0, purged: 0, skipped: 0, failed: 0} =
+               SessionCleanup.purge_once(now: ~U[2026-04-01 00:00:00.000000Z])
     end
   end
 
@@ -366,6 +525,15 @@ defmodule WajadiEngine.WhatsAppTest do
       type: "creds",
       key: "creds",
       value: %{"id" => "1"}
+    })
+  end
+
+  defp incoming_history(session_id, body) do
+    WhatsApp.create_incoming_chat_history(%{
+      session_id: session_id,
+      from: "user@s.whatsapp.net",
+      to: "bot@s.whatsapp.net",
+      body: body
     })
   end
 end

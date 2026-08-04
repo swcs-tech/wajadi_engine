@@ -1,11 +1,12 @@
 defmodule WajadiEngineWeb.WhatsAppControllerTest do
   use WajadiEngineWeb.ConnCase
 
+  alias WajadiEngine.Repo
   alias WajadiEngine.WhatsApp
   alias WajadiEngine.WhatsApp.SessionSupervisor
 
   describe "route parity" do
-    test "exposes only the TypeScript-compatible WhatsApp account routes" do
+    test "exposes scoped WhatsApp account routes" do
       whatsapp_routes =
         WajadiEngineWeb.Router.__routes__()
         |> Enum.filter(&String.starts_with?(&1.path, "/api/whatsapp"))
@@ -242,7 +243,7 @@ defmodule WajadiEngineWeb.WhatsAppControllerTest do
       assert WajadiEngine.Repo.aggregate(WajadiEngine.WhatsApp.AuthState, :count) == 0
     end
 
-    test "delete removes session and preserves chat history", %{conn: conn} do
+    test "delete archives session and preserves chat history", %{conn: conn} do
       session = create_runtime_session!()
 
       assert {:ok, _chat_history} =
@@ -258,9 +259,10 @@ defmodule WajadiEngineWeb.WhatsAppControllerTest do
         |> delete(~p"/api/whatsapp/account/#{session.user_id}/delete/#{session.session_id}")
         |> json_response(200)
 
-      assert response["message"] == "Session deleted permanently"
+      assert response["message"] == "Session archived"
       assert response["data"] == %{"session_id" => session.session_id}
       assert is_nil(WhatsApp.get_session(session.session_id))
+      assert Repo.get!(WajadiEngine.WhatsApp.Session, session.id).archived_at
       assert WhatsApp.count_chat_histories(session.session_id) == 1
     end
   end

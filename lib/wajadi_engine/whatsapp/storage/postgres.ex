@@ -1,6 +1,6 @@
 defmodule WajadiEngine.WhatsApp.Storage.Postgres do
   @moduledoc """
-  PostgreSQL-backed Amarula storage adapter using `wa_auth_states` rows.
+  PostgreSQL Amarula storage adapter using `wa_auth_states` rows.
   """
 
   @behaviour Amarula.Storage

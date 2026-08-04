@@ -1,6 +1,6 @@
 defmodule WajadiEngine.AI.Agent do
   @moduledoc """
-  LangChain-powered WhatsApp AI agent.
+  LangChain WhatsApp AI agent.
   """
 
   require Logger
@@ -12,14 +12,10 @@ defmodule WajadiEngine.AI.Agent do
   alias LangChain.Utils.ChainResult
   alias WajadiEngine.AI
   alias WajadiEngine.ProductCatalog
+  alias WajadiEngine.Stores
+  alias WajadiEngine.WhatsApp
   alias WajadiEngine.WhatsApp.SessionServer
   alias WajadiEngine.WhatsApp.SessionSupervisor
-
-  @default_personality """
-  Kamu adalah admin toko Wajadi.
-  Balas dalam Bahasa Indonesia dengan gaya ramah, singkat, natural, dan membantu.
-  Jangan mengarang produk, harga, stok, promo, ongkir, atau estimasi.
-  """
 
   @reply_policy """
   Kamu sedang membuat auto-reply WhatsApp.
@@ -38,8 +34,21 @@ defmodule WajadiEngine.AI.Agent do
   @type handle_result :: {:ok, String.t()} | {:error, term()}
 
   @spec system_prompt() :: String.t()
-  def system_prompt do
-    [personality(), @reply_policy]
+  def system_prompt, do: build_system_prompt(Stores.default_personality())
+
+  @spec system_prompt(integer(), integer()) :: String.t()
+  def system_prompt(account_id, store_id) when is_integer(account_id) and is_integer(store_id) do
+    personality =
+      case Stores.get_effective_personality(account_id, store_id) do
+        {:ok, prompt} -> prompt
+        {:error, :not_found} -> Stores.default_personality()
+      end
+
+    build_system_prompt(personality)
+  end
+
+  defp build_system_prompt(personality) do
+    [personality, @reply_policy]
     |> Enum.map(&String.trim/1)
     |> Enum.reject(&(&1 == ""))
     |> Enum.join("\n\n")
@@ -81,16 +90,29 @@ defmodule WajadiEngine.AI.Agent do
   @spec handle_incoming_message(String.t(), String.t(), keyword()) :: handle_result()
   def handle_incoming_message(session_id, user_message, opts)
       when is_binary(session_id) and is_binary(user_message) do
+    with {:ok, session} <- WhatsApp.fetch_session(session_id) do
+      handle_incoming_message(tenant_context(session), user_message, opts)
+    end
+  end
+
+  @spec handle_incoming_message(map(), String.t(), keyword()) :: handle_result()
+  def handle_incoming_message(
+        %{account_id: account_id, store_id: store_id, session_id: session_id} = context,
+        user_message,
+        opts
+      )
+      when is_integer(account_id) and is_integer(store_id) and is_binary(session_id) and
+             is_binary(user_message) do
     llm = Keyword.get(opts, :model) || model(opts)
 
     chain =
       LLMChain.new!(%{
         llm: llm,
-        custom_context: %{session_id: session_id}
+        custom_context: context
       })
       |> LLMChain.add_tools(Keyword.get(opts, :tools, reply_tools()))
       |> LLMChain.add_messages([
-        Message.new_system!(system_prompt()),
+        Message.new_system!(system_prompt(account_id, store_id)),
         Message.new_user!(user_message)
       ])
 
@@ -134,8 +156,10 @@ defmodule WajadiEngine.AI.Agent do
         },
         required: []
       },
-      function: fn arguments, _context ->
-        products = ProductCatalog.search_products(Map.get(arguments, "query"))
+      function: fn arguments, %{account_id: account_id, store_id: store_id} ->
+        products =
+          ProductCatalog.search_products(account_id, store_id, Map.get(arguments, "query"))
+
         Logger.debug("Product catalog lookup returned #{length(products)} products")
 
         {
@@ -354,9 +378,7 @@ defmodule WajadiEngine.AI.Agent do
   defp format_tool_error(:empty_value), do: "Failed: Required value is empty."
   defp format_tool_error(reason), do: "Failed: #{inspect(reason)}"
 
-  defp personality do
-    :wajadi_engine
-    |> Application.get_env(:ai_agent, [])
-    |> Keyword.get(:personality, @default_personality)
+  defp tenant_context(session) do
+    %{account_id: session.account_id, store_id: session.store_id, session_id: session.session_id}
   end
 end

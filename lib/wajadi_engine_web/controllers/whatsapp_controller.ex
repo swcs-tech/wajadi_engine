@@ -23,9 +23,7 @@ defmodule WajadiEngineWeb.WhatsAppController do
   def create(conn, %{"user_id" => user_id} = params) do
     with {:ok, attrs} <-
            SessionParams.validate_create(Map.get(params, "_json", Map.drop(params, ["user_id"]))),
-         {:ok, session} <- create_or_reuse_session(user_id, attrs),
-         {:ok, session} <- WhatsApp.mark_session_connecting(session),
-         {:ok, _pid} <- connect_runtime(session) do
+         {:ok, session} <- create_and_connect_session(user_id, attrs) do
       render_success(conn, 201, "Session created", %{
         session_id: session.session_id,
         user_id: session.user_id,
@@ -173,7 +171,7 @@ defmodule WajadiEngineWeb.WhatsAppController do
   def delete(conn, %{"user_id" => user_id, "session_id" => session_id}) do
     with {:ok, session} <- WhatsApp.fetch_session_for_user(user_id, session_id),
          :ok <- delete_session(session) do
-      render_success(conn, 200, "Session deleted permanently", %{session_id: session_id})
+      render_success(conn, 200, "Session archived", %{session_id: session_id})
     else
       {:error, :not_found} -> render_error(conn, 404, "Session not found", nil)
       {:error, reason} -> render_server_error(conn, "whatsapp.delete", reason)
@@ -187,14 +185,54 @@ defmodule WajadiEngineWeb.WhatsAppController do
       %Session{status: "connected"} = session ->
         {:error, :session_already_connected, session}
 
-      %Session{user_id: ^user_id} = session ->
-        {:ok, session}
-
-      %Session{} ->
-        {:error, :session_id_taken}
+      %Session{} = session ->
+        case WhatsApp.fetch_session_for_user(user_id, session.session_id) do
+          {:ok, owned_session} -> {:ok, owned_session, false}
+          {:error, :not_found} -> {:error, :session_id_taken}
+        end
 
       nil ->
-        WhatsApp.create_session(user_id, %{session_id: session_id})
+        case WhatsApp.create_session(user_id, Map.put(attrs, :session_id, session_id)) do
+          {:ok, session} -> {:ok, session, true}
+          {:error, reason} -> {:error, reason}
+        end
+    end
+  end
+
+  defp create_and_connect_session(user_id, attrs) do
+    case create_or_reuse_session(user_id, attrs) do
+      {:ok, session, created?} ->
+        case mark_and_connect_session(session) do
+          {:ok, session} -> {:ok, session}
+          {:error, reason} -> compensate_failed_creation(session, attrs, created?, reason)
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+
+      {:error, reason, session} ->
+        {:error, reason, session}
+    end
+  end
+
+  defp mark_and_connect_session(session) do
+    with {:ok, session} <- WhatsApp.mark_session_connecting(session),
+         {:ok, _pid} <- connect_runtime(session) do
+      {:ok, session}
+    end
+  end
+
+  defp compensate_failed_creation(_session, _attrs, false, reason), do: {:error, reason}
+
+  defp compensate_failed_creation(session, attrs, true, reason) do
+    delete_store? = not Map.has_key?(attrs, :store_id)
+
+    with :ok <- stop_runtime(session.session_id),
+         :ok <- WhatsApp.discard_session_creation(session, delete_store?) do
+      {:error, reason}
+    else
+      {:error, compensation_reason} ->
+        {:error, {:creation_compensation_failed, compensation_reason}}
     end
   end
 
@@ -247,11 +285,15 @@ defmodule WajadiEngineWeb.WhatsAppController do
   end
 
   defp force_delete_session(%Session{} = session) do
-    WhatsApp.clear_auth_states(session.session_id)
+    case WhatsApp.fetch_account(session.user_id) do
+      {:ok, account} ->
+        case WhatsApp.archive_session(account, session.session_id) do
+          {:ok, _session} -> :ok
+          {:error, reason} -> {:error, reason}
+        end
 
-    case WhatsApp.delete_session(session) do
-      {:ok, _session} -> :ok
-      {:error, reason} -> {:error, reason}
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 

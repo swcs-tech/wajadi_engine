@@ -22,6 +22,8 @@ defmodule WajadiEngineWeb.WhatsAppJSON do
   defp render_session(%Session{} = session) do
     %{
       session_id: session.session_id,
+      account_id: session.account_id,
+      store_id: session.store_id,
       user_id: session.user_id,
       phone_number: session.phone_number,
       status: session.status,
@@ -29,6 +31,8 @@ defmodule WajadiEngineWeb.WhatsAppJSON do
       is_active: session.is_active,
       last_connected_at: session.last_connected_at,
       last_disconnected_at: session.last_disconnected_at,
+      archived_at: session.archived_at,
+      purge_at: session.purge_at,
       created_at: session.inserted_at,
       updated_at: session.updated_at
     }

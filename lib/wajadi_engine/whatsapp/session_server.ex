@@ -173,13 +173,16 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
 
   def handle_call(:delete, _from, state) do
     state = logout_amarula(state)
-    WhatsApp.clear_auth_states(state.session_id)
 
     reply =
-      with {:ok, session} <- WhatsApp.fetch_session_for_user(state.user_id, state.session_id),
-           {:ok, _deleted} <- WhatsApp.delete_session(session) do
+      with {:ok, account} <- WhatsApp.fetch_account(state.user_id),
+           {:ok, _archived} <- WhatsApp.archive_session(account, state.session_id) do
         :ok
       end
+
+    if match?({:error, _reason}, reply) do
+      update_session_best_effort(state, &WhatsApp.mark_session_disconnected/1)
+    end
 
     {:stop, :normal, reply, clear_connection_state(state)}
   end
@@ -449,17 +452,19 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
   end
 
   defp handle_incoming_message(state, %Amarula.Msg{} = message) do
-    case log_incoming_message(state, message) do
-      {:ok, body} -> maybe_start_ai_reply(state, message, body)
-      :skip -> :ok
+    with {:ok, session} <- WhatsApp.fetch_session_for_user(state.user_id, state.session_id) do
+      case log_incoming_message(state, session, message) do
+        {:ok, body} -> maybe_start_ai_reply(state, session, message, body)
+        :skip -> :ok
+      end
     end
   end
 
   defp handle_incoming_message(_state, _message), do: :ok
 
-  defp log_incoming_message(_state, %Amarula.Msg{from_me: true}), do: :skip
+  defp log_incoming_message(_state, _session, %Amarula.Msg{from_me: true}), do: :skip
 
-  defp log_incoming_message(state, %Amarula.Msg{} = message) do
+  defp log_incoming_message(state, session, %Amarula.Msg{} = message) do
     case Helpers.extract_message_content(message) do
       nil ->
         :skip
@@ -473,7 +478,7 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
           type: Helpers.message_type(message)
         }
 
-        case WhatsApp.create_incoming_chat_history(attrs) do
+        case WhatsApp.create_incoming_chat_history(session, attrs) do
           {:ok, _chat_history} ->
             {:ok, body}
 
@@ -489,25 +494,31 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
     end
   end
 
-  defp maybe_start_ai_reply(state, message, body) do
-    with {:ok, session} <- WhatsApp.fetch_session_for_user(state.user_id, state.session_id),
-         true <- session.status != "paused",
+  defp maybe_start_ai_reply(state, session, message, body) do
+    with true <- session.status != "paused",
          true <- session.status == "connected",
          true <- connected_connection?(state),
          {:ok, target_jid} <- reply_target(message) do
+      context = tenant_context(session)
+
       cond do
-        ping_message?(body) -> start_ping_reply(state)
-        product_image_reply_available?(body) -> start_product_image_reply(state, target_jid, body)
-        true -> start_ai_reply(state, target_jid, body)
+        ping_message?(body) ->
+          start_ping_reply(state, context)
+
+        product_image_reply_available?(context, body) ->
+          start_product_image_reply(state, context, target_jid, body)
+
+        true ->
+          start_ai_reply(state, context, target_jid, body)
       end
     else
       _skip -> :ok
     end
   end
 
-  defp start_ping_reply(%{ai_async?: true} = state) do
+  defp start_ping_reply(%{ai_async?: true} = state, context) do
     case Task.Supervisor.start_child(WajadiEngine.TaskSupervisor, fn ->
-           run_direct_reply(state, @ping_target, "pong")
+           run_direct_reply(state, context, @ping_target, "pong")
          end) do
       {:ok, _pid} ->
         :ok
@@ -520,20 +531,21 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
     end
   end
 
-  defp start_ping_reply(state), do: run_direct_reply(state, @ping_target, "pong")
+  defp start_ping_reply(state, context),
+    do: run_direct_reply(state, context, @ping_target, "pong")
 
-  defp run_direct_reply(state, target_jid, reply) do
+  defp run_direct_reply(state, context, target_jid, reply) do
     result = send_text_result(state, target_jid, reply, [])
-    log_outgoing_message(state, target_jid, reply, "text", result)
+    log_outgoing_message(state, context, target_jid, reply, "text", result)
   end
 
   defp ping_message?(body) when is_binary(body) do
     body |> String.trim() |> String.downcase() == "ping"
   end
 
-  defp start_ai_reply(%{ai_async?: true} = state, target_jid, body) do
+  defp start_ai_reply(%{ai_async?: true} = state, context, target_jid, body) do
     case Task.Supervisor.start_child(WajadiEngine.TaskSupervisor, fn ->
-           run_ai_reply(state, target_jid, body)
+           run_ai_reply(state, context, target_jid, body)
          end) do
       {:ok, _pid} ->
         :ok
@@ -546,11 +558,12 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
     end
   end
 
-  defp start_ai_reply(state, target_jid, body), do: run_ai_reply(state, target_jid, body)
+  defp start_ai_reply(state, context, target_jid, body),
+    do: run_ai_reply(state, context, target_jid, body)
 
-  defp start_product_image_reply(%{ai_async?: true} = state, target_jid, body) do
+  defp start_product_image_reply(%{ai_async?: true} = state, context, target_jid, body) do
     case Task.Supervisor.start_child(WajadiEngine.TaskSupervisor, fn ->
-           run_product_image_reply(state, target_jid, body)
+           run_product_image_reply(state, context, target_jid, body)
          end) do
       {:ok, _pid} ->
         :ok
@@ -563,29 +576,31 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
     end
   end
 
-  defp start_product_image_reply(state, target_jid, body) do
-    run_product_image_reply(state, target_jid, body)
+  defp start_product_image_reply(state, context, target_jid, body) do
+    run_product_image_reply(state, context, target_jid, body)
   end
 
-  defp run_product_image_reply(state, target_jid, body) do
+  defp run_product_image_reply(state, context, target_jid, body) do
     send_chatstate_best_effort(state, target_jid, :composing)
 
-    case product_image_reply(body) do
+    case product_image_reply(context, body) do
       {:ok, product, image_url} ->
-        send_product_image_reply(state, target_jid, product, image_url)
+        send_product_image_reply(state, context, target_jid, product, image_url)
 
       :fallback ->
-        run_ai_reply(state, target_jid, body)
+        run_ai_reply(state, context, target_jid, body)
     end
   after
     send_chatstate_best_effort(state, target_jid, :paused)
   end
 
-  defp product_image_reply_available?(body), do: product_image_reply(body) != :fallback
+  defp product_image_reply_available?(context, body),
+    do: product_image_reply(context, body) != :fallback
 
-  defp product_image_reply(body) do
+  defp product_image_reply(context, body) do
     with true <- ProductCatalog.image_request?(body),
-         [product] <- ProductCatalog.search_products(body),
+         [product] <-
+           ProductCatalog.search_products(context.account_id, context.store_id, body),
          image_url when is_binary(image_url) <- ProductCatalog.product_image_url(product) do
       {:ok, product, image_url}
     else
@@ -593,13 +608,13 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
     end
   end
 
-  defp send_product_image_reply(state, target_jid, product, image_url) do
+  defp send_product_image_reply(state, context, target_jid, product, image_url) do
     caption = ProductCatalog.product_caption(product)
 
     case fetch_product_image(image_url) do
       {:ok, bytes} ->
         result = send_media_result(state, target_jid, :image, bytes, caption: caption)
-        log_outgoing_message(state, target_jid, caption, "image", result)
+        log_outgoing_message(state, context, target_jid, caption, "image", result)
 
       {:error, reason} ->
         Logger.warning("Product image fetch failed",
@@ -609,15 +624,27 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
 
         message = "Maaf, foto #{caption} belum bisa dikirim saat ini."
         result = send_text_result(state, target_jid, message, [])
-        log_outgoing_message(state, target_jid, message, "text", result)
+        log_outgoing_message(state, context, target_jid, message, "text", result)
     end
   end
 
   defp fetch_product_image("data:" <> _rest = data_url), do: decode_data_url(data_url)
 
   defp fetch_product_image(url) when is_binary(url) do
+    with {:ok, %URI{scheme: "https", host: host}} when is_binary(host) <- URI.new(url),
+         true <- allowed_product_image_host?(host) do
+      request_product_image(url)
+    else
+      _invalid_or_disallowed -> {:error, :product_image_host_not_allowed}
+    end
+  end
+
+  defp fetch_product_image(_url), do: {:error, :missing_product_image_url}
+
+  defp request_product_image(url) do
     case Req.get(url,
            retry: false,
+           redirect: false,
            receive_timeout: @product_image_receive_timeout,
            connect_options: [timeout: @product_image_connect_timeout],
            into: &collect_product_image_chunk/2
@@ -641,12 +668,28 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
     end
   end
 
-  defp fetch_product_image(_url), do: {:error, :missing_product_image_url}
+  defp allowed_product_image_host?(host) do
+    host = String.downcase(host)
+
+    :wajadi_engine
+    |> Application.get_env(:product_image_allowed_hosts, [])
+    |> Enum.any?(&(String.downcase(&1) == host))
+  end
 
   defp decode_data_url(data_url) do
     case Regex.run(~r/^data:[^;]+;base64,(?<data>.+)$/s, data_url, capture: ["data"]) do
-      [data] -> Base.decode64(data)
-      nil -> {:error, :invalid_data_url}
+      [data] when byte_size(data) <= div(@max_product_image_bytes * 4, 3) + 4 ->
+        case Base.decode64(data) do
+          {:ok, bytes} when byte_size(bytes) <= @max_product_image_bytes -> {:ok, bytes}
+          {:ok, _bytes} -> {:error, :product_image_too_large}
+          :error -> :error
+        end
+
+      [_data] ->
+        {:error, :product_image_too_large}
+
+      nil ->
+        {:error, :invalid_data_url}
     end
   end
 
@@ -667,13 +710,13 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
     end
   end
 
-  defp run_ai_reply(state, target_jid, body) do
+  defp run_ai_reply(state, context, target_jid, body) do
     send_chatstate_best_effort(state, target_jid, :composing)
 
-    case state.ai_agent.handle_incoming_message(state.session_id, body) do
+    case state.ai_agent.handle_incoming_message(context, body) do
       {:ok, reply} when is_binary(reply) and reply != "" ->
         result = send_text_result(state, target_jid, reply, [])
-        log_outgoing_message(state, target_jid, reply, "text", result)
+        log_outgoing_message(state, context, target_jid, reply, "text", result)
 
       {:ok, _empty_reply} ->
         :ok
@@ -714,6 +757,10 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
   end
 
   defp log_outgoing_message(state, jid, body, type, result) do
+    log_outgoing_message(state, nil, jid, body, type, result)
+  end
+
+  defp log_outgoing_message(state, context, jid, body, type, result) do
     attrs = %{
       session_id: state.session_id,
       from: own_jid(state) || "unknown",
@@ -724,7 +771,16 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
       error: outgoing_error(result)
     }
 
-    case WhatsApp.create_outgoing_chat_history(attrs) do
+    history_result =
+      case context do
+        %{store_id: _store_id, session_id: _session_id} ->
+          WhatsApp.create_outgoing_chat_history(context, attrs)
+
+        nil ->
+          WhatsApp.create_outgoing_chat_history(attrs)
+      end
+
+    case history_result do
       {:ok, _chat_history} ->
         :ok
 
@@ -781,6 +837,10 @@ defmodule WajadiEngine.WhatsApp.SessionServer do
     with {:ok, session} <- WhatsApp.fetch_session_for_user(state.user_id, state.session_id) do
       fun.(session)
     end
+  end
+
+  defp tenant_context(session) do
+    %{account_id: session.account_id, store_id: session.store_id, session_id: session.session_id}
   end
 
   defp update_session_best_effort(state, fun) do

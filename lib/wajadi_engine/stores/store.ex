@@ -4,6 +4,8 @@ defmodule WajadiEngine.Stores.Store do
   import Ecto.Changeset
 
   alias WajadiEngine.Accounts.Account
+  alias WajadiEngine.Stores.Personality
+  alias WajadiEngine.Stores.Product
   alias WajadiEngine.WhatsApp.ChatHistory
   alias WajadiEngine.WhatsApp.Session
 
@@ -29,6 +31,8 @@ defmodule WajadiEngine.Stores.Store do
     field :purge_at, :utc_datetime_usec
 
     belongs_to :account, Account
+    has_one :personality, Personality
+    has_many :products, Product
     has_many :sessions, Session
     has_many :chat_histories, ChatHistory
 
@@ -40,9 +44,16 @@ defmodule WajadiEngine.Stores.Store do
 
   @spec create_changeset(t(), Account.t(), map()) :: Ecto.Changeset.t()
   def create_changeset(store, %Account{id: account_id}, attrs) when is_map(attrs) do
+    create_changeset(store, %Account{id: account_id}, attrs, "unassigned")
+  end
+
+  @spec create_changeset(t(), Account.t(), map(), status()) :: Ecto.Changeset.t()
+  def create_changeset(store, %Account{id: account_id}, attrs, status)
+      when is_map(attrs) and status in @statuses do
     store
-    |> cast(attrs, [:name, :status])
+    |> cast(attrs, [:name])
     |> put_change(:account_id, account_id)
+    |> put_change(:status, status)
     |> validate_required([:account_id, :name, :status])
     |> validate_length(:name, min: 1, max: 160)
     |> validate_inclusion(:status, @statuses)

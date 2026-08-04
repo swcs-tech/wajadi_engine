@@ -2,11 +2,13 @@ defmodule WajadiEngine.WhatsApp.SessionServerTest do
   use WajadiEngine.DataCase
 
   import Ecto.Query
+  import WajadiEngine.AccountsFixtures
 
   alias Amarula.Address
   alias Amarula.Protocol.Auth.AuthUtils
   alias Amarula.Protocol.Proto
   alias WajadiEngine.Repo
+  alias WajadiEngine.Stores.Product
   alias WajadiEngine.WhatsApp
   alias WajadiEngine.WhatsApp.AuthState
   alias WajadiEngine.WhatsApp.ChatHistory
@@ -352,20 +354,23 @@ defmodule WajadiEngine.WhatsApp.SessionServerTest do
     end
 
     test "product image request sends image media when one matching product has image URL" do
-      with_product_catalog([
-        %{
-          id: "kopi-arabica-250g",
-          name: "Kopi Arabica 250g",
-          price: 75_000,
-          currency: "IDR",
-          stock_quantity: 10,
-          description: "Rasa fruity dengan acidity ringan.",
-          image_url: "data:image/jpeg;base64,AAEC"
-        }
-      ])
-
       session_id = unique_session_id()
       assert {:ok, session} = WhatsApp.create_session("user-1", %{session_id: session_id})
+      account = Repo.get!(WajadiEngine.Accounts.Account, session.account_id)
+      store = Repo.get!(WajadiEngine.Stores.Store, session.store_id)
+
+      product =
+        product_fixture(account, store, %{
+          name: "Kopi Arabica 250g",
+          price: "75000.00",
+          stock_quantity: 10,
+          description: "Rasa fruity dengan acidity ringan."
+        })
+
+      Product
+      |> where([stored_product], stored_product.id == ^product.id)
+      |> Repo.update_all(set: [image_url: "data:image/jpeg;base64,AAEC"])
+
       assert {:ok, _session} = WhatsApp.mark_session_connected(session)
 
       assert {:ok, pid} =
@@ -425,7 +430,7 @@ defmodule WajadiEngine.WhatsApp.SessionServerTest do
       assert incoming.body == "hello"
     end
 
-    test "delete removes session and stops runtime process" do
+    test "delete archives session and stops runtime process" do
       session_id = unique_session_id()
       assert {:ok, session} = WhatsApp.create_session("user-1", %{session_id: session_id})
 
@@ -454,6 +459,7 @@ defmodule WajadiEngine.WhatsApp.SessionServerTest do
       assert :ok = SessionServer.delete(pid)
       assert_receive {:DOWN, ^ref, :process, ^pid, :normal}
       assert is_nil(WhatsApp.get_session(session.session_id))
+      assert Repo.get!(WajadiEngine.WhatsApp.Session, session.id).archived_at
       assert count_auth_states(session.session_id) == 0
       assert WhatsApp.count_chat_histories(session.session_id) == 1
     end
@@ -517,13 +523,6 @@ defmodule WajadiEngine.WhatsApp.SessionServerTest do
           name: "Test Bot"
         })
     }
-  end
-
-  defp with_product_catalog(products) do
-    original = Application.get_env(:wajadi_engine, :product_catalog)
-
-    Application.put_env(:wajadi_engine, :product_catalog, products: products)
-    on_exit(fn -> Application.put_env(:wajadi_engine, :product_catalog, original) end)
   end
 
   defp text_msg(opts) do

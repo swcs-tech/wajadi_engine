@@ -51,11 +51,15 @@ defmodule WajadiEngine.WhatsApp.Session do
   @spec statuses() :: [status()]
   def statuses, do: @statuses
 
-  @spec create_changeset(t(), map()) :: Ecto.Changeset.t()
-  def create_changeset(session, attrs) do
+  @spec create_changeset(t(), Account.t(), Store.t(), map()) :: Ecto.Changeset.t()
+  def create_changeset(
+        session,
+        %Account{id: account_id, email: email},
+        %Store{id: store_id},
+        attrs
+      ) do
     session
     |> cast(attrs, [
-      :user_id,
       :session_id,
       :phone_number,
       :status,
@@ -63,10 +67,11 @@ defmodule WajadiEngine.WhatsApp.Session do
       :is_active,
       :last_connected_at,
       :last_disconnected_at,
-      :last_qr_at,
-      :account_id,
-      :store_id
+      :last_qr_at
     ])
+    |> put_change(:account_id, account_id)
+    |> put_change(:store_id, store_id)
+    |> put_change(:user_id, email)
     |> validate_required([:account_id, :store_id, :user_id, :session_id, :status, :is_active])
     |> validate_inclusion(:status, @statuses)
     |> unique_constraint(:session_id)
@@ -93,8 +98,41 @@ defmodule WajadiEngine.WhatsApp.Session do
     |> validate_required([:status, :is_active])
     |> validate_inclusion(:status, @statuses)
     |> validate_archive_window()
+    |> unique_constraint(:store_id, name: :wa_sessions_one_non_archived_session_per_store_index)
     |> check_constraint(:status, name: :wa_sessions_status_check)
     |> check_constraint(:purge_at, name: :wa_sessions_archive_window_check)
+  end
+
+  @spec assignment_changeset(t(), Store.t()) :: Ecto.Changeset.t()
+  def assignment_changeset(session, %Store{id: store_id}) do
+    session
+    |> change(store_id: store_id)
+    |> unique_constraint(:store_id, name: :wa_sessions_one_non_archived_session_per_store_index)
+    |> foreign_key_constraint(:store_id)
+  end
+
+  @spec archive_changeset(t(), DateTime.t(), DateTime.t()) :: Ecto.Changeset.t()
+  def archive_changeset(session, archived_at, purge_at) do
+    update_changeset(session, %{
+      status: "disconnected",
+      is_active: false,
+      qr: nil,
+      archived_at: archived_at,
+      purge_at: purge_at,
+      last_disconnected_at: archived_at
+    })
+  end
+
+  @spec restore_changeset(t(), DateTime.t()) :: Ecto.Changeset.t()
+  def restore_changeset(session, restored_at) do
+    update_changeset(session, %{
+      status: "disconnected",
+      is_active: false,
+      qr: nil,
+      archived_at: nil,
+      purge_at: nil,
+      last_disconnected_at: restored_at
+    })
   end
 
   defp validate_archive_window(changeset) do

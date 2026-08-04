@@ -13,7 +13,16 @@ defmodule WajadiEngine.WhatsApp do
   alias WajadiEngine.WhatsApp.ChatHistory
   alias WajadiEngine.WhatsApp.Session
 
-  @type session_result :: {:ok, Session.t()} | {:error, Ecto.Changeset.t() | :not_found}
+  @archive_retention_days 90
+
+  @type session_error ::
+          Ecto.Changeset.t()
+          | :not_found
+          | :store_not_available
+          | :purge_deadline_passed
+          | :store_occupied
+
+  @type session_result :: {:ok, Session.t()} | {:error, session_error()}
   @type auth_state_metadata :: %{
           type: String.t(),
           key: String.t(),
@@ -23,36 +32,39 @@ defmodule WajadiEngine.WhatsApp do
 
   @spec generate_session_id(String.t()) :: String.t()
   def generate_session_id(user_id) when is_binary(user_id) do
-    "#{user_id}_#{System.system_time(:millisecond)}"
+    "#{user_id}_#{System.unique_integer([:positive, :monotonic])}"
   end
 
-  @spec create_session(String.t(), map()) :: {:ok, Session.t()} | {:error, Ecto.Changeset.t()}
+  @spec create_session(String.t(), map()) :: session_result()
   def create_session(user_id, attrs \\ %{}) when is_binary(user_id) and is_map(attrs) do
-    attrs = normalize_attrs(attrs, session_fields())
+    attrs = normalize_attrs(attrs, [:store_id | session_fields()])
     normalized_user_id = normalize_user_id(user_id)
     session_id = session_id_from(attrs) || generate_session_id(normalized_user_id)
-    attrs = Map.merge(attrs, %{user_id: normalized_user_id, session_id: session_id})
+    store_id = Map.get(attrs, :store_id)
+    attrs = attrs |> Map.delete(:store_id) |> Map.put(:session_id, session_id)
 
     Multi.new()
     |> Multi.run(:account, fn repo, _changes ->
       get_or_create_account(repo, normalized_user_id)
     end)
-    |> Multi.insert(:store, fn %{account: account} ->
-      Store.create_changeset(%Store{}, account, %{
-        name: default_store_name(session_id),
-        status: "active"
-      })
+    |> Multi.run(:store, fn repo, %{account: account} ->
+      get_or_create_session_store(repo, account, store_id, session_id)
     end)
     |> Multi.insert(:session, fn %{account: account, store: store} ->
-      Session.create_changeset(
-        %Session{},
-        Map.merge(attrs, %{account_id: account.id, store_id: store.id})
-      )
+      Session.create_changeset(%Session{}, account, store, attrs)
     end)
     |> Repo.transaction()
     |> case do
       {:ok, %{session: session}} -> {:ok, session}
       {:error, _operation, reason, _changes} -> {:error, reason}
+    end
+  end
+
+  @spec fetch_account(String.t()) :: {:ok, Account.t()} | {:error, :not_found}
+  def fetch_account(user_id) when is_binary(user_id) do
+    case Repo.get_by(Account, email: normalize_user_id(user_id)) do
+      %Account{} = account -> {:ok, account}
+      nil -> {:error, :not_found}
     end
   end
 
@@ -87,14 +99,29 @@ defmodule WajadiEngine.WhatsApp do
           {:ok, Session.t()} | {:error, :not_found}
   def fetch_session_for_user(user_id, session_id)
       when is_binary(user_id) and is_binary(session_id) do
-    session =
-      Session
-      |> where([session], session.user_id == ^normalize_user_id(user_id))
-      |> where([session], session.session_id == ^session_id)
-      |> where([session], is_nil(session.archived_at))
-      |> Repo.one()
+    with {:ok, account} <- fetch_account(user_id) do
+      fetch_session_for_account(account, session_id)
+    end
+  end
 
-    case session do
+  @spec fetch_session_for_account(Account.t(), String.t()) :: session_result()
+  def fetch_session_for_account(%Account{id: account_id}, session_id)
+      when is_binary(session_id) do
+    case active_session_query(account_id, session_id) |> Repo.one() do
+      %Session{} = session -> {:ok, session}
+      nil -> {:error, :not_found}
+    end
+  end
+
+  @spec fetch_archived_session(Account.t(), String.t()) :: session_result()
+  def fetch_archived_session(%Account{id: account_id}, session_id) when is_binary(session_id) do
+    query =
+      Session
+      |> where([session], session.account_id == ^account_id)
+      |> where([session], session.session_id == ^session_id)
+      |> where([session], not is_nil(session.archived_at))
+
+    case Repo.one(query) do
       %Session{} = session -> {:ok, session}
       nil -> {:error, :not_found}
     end
@@ -116,6 +143,119 @@ defmodule WajadiEngine.WhatsApp do
 
   @spec delete_session(Session.t()) :: {:ok, Session.t()} | {:error, Ecto.Changeset.t()}
   def delete_session(%Session{} = session), do: Repo.delete(session)
+
+  @spec discard_session_creation(Session.t(), boolean()) :: :ok | {:error, term()}
+  def discard_session_creation(%Session{} = session, delete_store?) do
+    Multi.new()
+    |> Multi.delete_all(
+      :auth_states,
+      from(auth_state in AuthState, where: auth_state.session_id == ^session.session_id)
+    )
+    |> Multi.delete(:session, session)
+    |> Multi.run(:store, fn repo, _changes ->
+      store = repo.get!(Store, session.store_id)
+      discard_session_store(repo, store, delete_store?)
+    end)
+    |> Repo.transaction()
+    |> case do
+      {:ok, _changes} -> :ok
+      {:error, _operation, reason, _changes} -> {:error, reason}
+    end
+  end
+
+  @spec move_session(Account.t(), String.t(), integer()) :: session_result()
+  def move_session(%Account{} = account, session_id, target_store_id)
+      when is_binary(session_id) and is_integer(target_store_id) do
+    Multi.new()
+    |> Multi.run(:session, fn repo, _changes ->
+      lock_active_session(repo, account.id, session_id)
+    end)
+    |> Multi.run(:target_store, fn repo, %{session: session} ->
+      lock_assignment_store(repo, account.id, target_store_id, session.id)
+    end)
+    |> Multi.run(:source_store, fn repo, %{session: session} ->
+      lock_store(repo, account.id, session.store_id, false)
+    end)
+    |> Multi.run(:moved_session, fn repo, %{session: session, target_store: target_store} ->
+      if session.store_id == target_store.id do
+        {:ok, session}
+      else
+        session
+        |> Session.assignment_changeset(target_store)
+        |> repo.update()
+      end
+    end)
+    |> Multi.run(:source_status, fn repo, changes ->
+      update_source_store_after_move(repo, changes)
+    end)
+    |> Multi.run(:target_status, fn repo, %{target_store: target_store} ->
+      update_store_status(repo, target_store, "active")
+    end)
+    |> Repo.transaction()
+    |> multi_result(:moved_session)
+  end
+
+  @spec archive_session(Account.t(), String.t(), DateTime.t()) :: session_result()
+  def archive_session(%Account{} = account, session_id, archived_at \\ now())
+      when is_binary(session_id) do
+    purge_at = DateTime.add(archived_at, @archive_retention_days, :day)
+
+    Multi.new()
+    |> Multi.run(:session, fn repo, _changes ->
+      lock_active_session(repo, account.id, session_id)
+    end)
+    |> Multi.run(:store, fn repo, %{session: session} ->
+      lock_store(repo, account.id, session.store_id, false)
+    end)
+    |> Multi.run(:auth_states, fn repo, %{session: session} ->
+      {count, nil} =
+        AuthState
+        |> where([auth_state], auth_state.session_id == ^session.session_id)
+        |> repo.delete_all()
+
+      {:ok, count}
+    end)
+    |> Multi.run(:archived_session, fn repo, %{session: session} ->
+      session
+      |> Session.archive_changeset(archived_at, purge_at)
+      |> repo.update()
+    end)
+    |> Multi.run(:store_status, fn repo, %{store: store} ->
+      update_store_status(repo, store, "unassigned")
+    end)
+    |> Repo.transaction()
+    |> multi_result(:archived_session)
+  end
+
+  @spec restore_session(Account.t(), String.t(), DateTime.t()) :: session_result()
+  def restore_session(%Account{} = account, session_id, current_time \\ now())
+      when is_binary(session_id) do
+    Multi.new()
+    |> Multi.run(:session, fn repo, _changes ->
+      lock_restorable_session(repo, account.id, session_id, current_time)
+    end)
+    |> Multi.run(:store, fn repo, %{session: session} ->
+      lock_assignment_store(repo, account.id, session.store_id, session.id)
+    end)
+    |> Multi.run(:auth_states, fn repo, %{session: session} ->
+      {count, nil} =
+        AuthState
+        |> where([auth_state], auth_state.session_id == ^session.session_id)
+        |> repo.delete_all()
+
+      {:ok, count}
+    end)
+    |> Multi.run(:restored_session, fn repo, %{session: session} ->
+      session
+      |> Session.restore_changeset(current_time)
+      |> repo.update()
+    end)
+    |> Multi.run(:store_status, fn repo, %{store: store} ->
+      update_store_status(repo, store, "active")
+    end)
+    |> Repo.transaction()
+    |> multi_result(:restored_session)
+  end
 
   @spec mark_session_connecting(Session.t()) :: session_result()
   def mark_session_connecting(%Session{} = session) do
@@ -171,6 +311,15 @@ defmodule WajadiEngine.WhatsApp do
     |> create_chat_history()
   end
 
+  @spec create_incoming_chat_history(Session.t(), map()) ::
+          {:ok, ChatHistory.t()} | {:error, Ecto.Changeset.t()}
+  def create_incoming_chat_history(%Session{} = session, attrs) when is_map(attrs) do
+    attrs
+    |> normalize_attrs(chat_history_fields())
+    |> Map.merge(%{session_id: session.session_id, from_me: false, status: "received"})
+    |> create_chat_history(session.store_id)
+  end
+
   @spec create_outgoing_chat_history(map()) ::
           {:ok, ChatHistory.t()} | {:error, Ecto.Changeset.t()}
   def create_outgoing_chat_history(attrs) when is_map(attrs) do
@@ -181,6 +330,20 @@ defmodule WajadiEngine.WhatsApp do
     |> create_chat_history()
   end
 
+  @spec create_outgoing_chat_history(map(), map()) ::
+          {:ok, ChatHistory.t()} | {:error, Ecto.Changeset.t()}
+  def create_outgoing_chat_history(
+        %{store_id: store_id, session_id: session_id},
+        attrs
+      )
+      when is_integer(store_id) and is_binary(session_id) and is_map(attrs) do
+    attrs
+    |> normalize_attrs(chat_history_fields())
+    |> Map.merge(%{store_id: store_id, session_id: session_id, from_me: true})
+    |> Map.put_new(:status, "sent")
+    |> create_chat_history(store_id)
+  end
+
   @spec create_chat_history(map()) :: {:ok, ChatHistory.t()} | {:error, Ecto.Changeset.t()}
   def create_chat_history(attrs) when is_map(attrs) do
     attrs =
@@ -188,6 +351,18 @@ defmodule WajadiEngine.WhatsApp do
       |> normalize_attrs(chat_history_fields())
       |> Map.put_new(:type, "text")
       |> put_chat_history_store_id()
+
+    %ChatHistory{}
+    |> ChatHistory.create_changeset(attrs)
+    |> Repo.insert()
+  end
+
+  defp create_chat_history(attrs, store_id) do
+    attrs =
+      attrs
+      |> normalize_attrs([:store_id | chat_history_fields()])
+      |> Map.put(:store_id, store_id)
+      |> Map.put_new(:type, "text")
 
     %ChatHistory{}
     |> ChatHistory.create_changeset(attrs)
@@ -253,6 +428,27 @@ defmodule WajadiEngine.WhatsApp do
     |> Repo.update()
   end
 
+  defp get_or_create_session_store(repo, account, nil, session_id) do
+    %Store{}
+    |> Store.create_changeset(account, %{name: default_store_name(session_id)}, "active")
+    |> repo.insert()
+  end
+
+  defp get_or_create_session_store(repo, account, store_id, _session_id)
+       when is_integer(store_id) do
+    with {:ok, store} <- lock_store(repo, account.id, store_id, false),
+         "unassigned" <- store.status,
+         false <- store_has_non_archived_session?(repo, store.id),
+         {:ok, store} <- update_store_status(repo, store, "active") do
+      {:ok, store}
+    else
+      _unavailable -> {:error, :store_not_available}
+    end
+  end
+
+  defp get_or_create_session_store(_repo, _account, _store_id, _session_id),
+    do: {:error, :store_not_available}
+
   defp get_or_create_account(repo, email) do
     changeset = Account.create_changeset(%Account{}, %{email: email})
 
@@ -279,9 +475,6 @@ defmodule WajadiEngine.WhatsApp do
     end
   end
 
-  defp put_chat_history_store_id(%{store_id: store_id} = attrs) when is_integer(store_id),
-    do: attrs
-
   defp put_chat_history_store_id(%{session_id: session_id} = attrs) when is_binary(session_id) do
     session =
       Session
@@ -304,6 +497,111 @@ defmodule WajadiEngine.WhatsApp do
   defp session_id_from(attrs) do
     Map.get(attrs, :session_id)
   end
+
+  defp active_session_query(account_id, session_id) do
+    Session
+    |> where([session], session.account_id == ^account_id)
+    |> where([session], session.session_id == ^session_id)
+    |> where([session], is_nil(session.archived_at))
+  end
+
+  defp lock_active_session(repo, account_id, session_id) do
+    case active_session_query(account_id, session_id) |> lock("FOR UPDATE") |> repo.one() do
+      %Session{} = session -> {:ok, session}
+      nil -> {:error, :not_found}
+    end
+  end
+
+  defp lock_restorable_session(repo, account_id, session_id, current_time) do
+    query =
+      Session
+      |> where([session], session.account_id == ^account_id)
+      |> where([session], session.session_id == ^session_id)
+      |> where([session], not is_nil(session.archived_at))
+      |> lock("FOR UPDATE")
+
+    case repo.one(query) do
+      %Session{purge_at: purge_at} = session ->
+        if DateTime.compare(purge_at, current_time) == :gt,
+          do: {:ok, session},
+          else: {:error, :purge_deadline_passed}
+
+      nil ->
+        {:error, :not_found}
+    end
+  end
+
+  defp lock_assignment_store(repo, account_id, store_id, session_id) do
+    with {:ok, store} <- lock_store(repo, account_id, store_id, false),
+         false <- store_has_other_non_archived_session?(repo, store.id, session_id) do
+      {:ok, store}
+    else
+      true -> {:error, :store_occupied}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp lock_store(repo, account_id, store_id, archived?) do
+    archive_filter =
+      if archived?,
+        do: dynamic([store], not is_nil(store.archived_at)),
+        else: dynamic([store], is_nil(store.archived_at))
+
+    query =
+      Store
+      |> where([store], store.id == ^store_id and store.account_id == ^account_id)
+      |> where(^archive_filter)
+      |> lock("FOR UPDATE")
+
+    case repo.one(query) do
+      %Store{} = store -> {:ok, store}
+      nil -> {:error, :not_found}
+    end
+  end
+
+  defp store_has_non_archived_session?(repo, store_id) do
+    Session
+    |> where([session], session.store_id == ^store_id and is_nil(session.archived_at))
+    |> repo.exists?()
+  end
+
+  defp store_has_other_non_archived_session?(repo, store_id, session_id) do
+    Session
+    |> where(
+      [session],
+      session.store_id == ^store_id and session.id != ^session_id and
+        is_nil(session.archived_at)
+    )
+    |> repo.exists?()
+  end
+
+  defp update_source_store_after_move(
+         _repo,
+         %{session: %{store_id: store_id}, target_store: %{id: store_id}, source_store: store}
+       ),
+       do: {:ok, store}
+
+  defp update_source_store_after_move(repo, %{source_store: store}),
+    do: update_store_status(repo, store, "unassigned")
+
+  defp update_store_status(repo, store, status) do
+    store
+    |> Store.update_changeset(%{status: status})
+    |> repo.update()
+  end
+
+  defp discard_session_store(repo, store, true) do
+    case repo.delete(store) do
+      {:ok, _store} -> {:ok, :deleted}
+      {:error, changeset} -> {:error, changeset}
+    end
+  end
+
+  defp discard_session_store(repo, store, false),
+    do: update_store_status(repo, store, "unassigned")
+
+  defp multi_result({:ok, changes}, key), do: {:ok, Map.fetch!(changes, key)}
+  defp multi_result({:error, _operation, reason, _changes}, _key), do: {:error, reason}
 
   defp normalize_attrs(attrs, fields) do
     Enum.reduce(fields, %{}, fn field, acc ->
@@ -331,7 +629,7 @@ defmodule WajadiEngine.WhatsApp do
   end
 
   defp chat_history_fields do
-    [:store_id, :session_id, :from, :to, :from_me, :body, :type, :status, :error]
+    [:session_id, :from, :to, :from_me, :body, :type, :status, :error]
   end
 
   defp auth_state_fields do
