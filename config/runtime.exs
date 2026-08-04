@@ -48,6 +48,12 @@ config :wajadi_engine, :ai,
   nine_router_api_key: env_string.("NINE_ROUTER_API_KEY", "dummy-key"),
   nine_router_model: env_string.("NINE_ROUTER_MODEL", "gpt-4o")
 
+config :wajadi_engine, WajadiEngine.WhatsApp.SessionCleanupScheduler,
+  enabled?: env!("WAJADI_SESSION_CLEANUP_ENABLED", :boolean!, false),
+  interval_ms: env!("WAJADI_SESSION_CLEANUP_INTERVAL_MS", :integer!, :timer.hours(24)),
+  batch_size: env!("WAJADI_SESSION_CLEANUP_BATCH_SIZE", :integer!, 100),
+  run_on_start?: env!("WAJADI_SESSION_CLEANUP_RUN_ON_START", :boolean!, false)
+
 case System.get_env("PRINT_WA_QR") do
   value when value in ["1", "true", "TRUE", "yes", "YES"] ->
     config :wajadi_engine, :whatsapp_print_qr, true

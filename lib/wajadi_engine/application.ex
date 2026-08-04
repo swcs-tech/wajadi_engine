@@ -15,6 +15,7 @@ defmodule WajadiEngine.Application do
       {Registry, keys: :unique, name: WajadiEngine.WhatsApp.SessionRegistry},
       WajadiEngine.WhatsApp.SessionSupervisor,
       WajadiEngine.WhatsApp.SessionRestorer,
+      WajadiEngine.WhatsApp.SessionCleanupScheduler,
       {DNSCluster, query: Application.get_env(:wajadi_engine, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: WajadiEngine.PubSub},
       # Start a worker by calling: WajadiEngine.Worker.start_link(arg)

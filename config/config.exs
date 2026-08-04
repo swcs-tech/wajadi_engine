@@ -27,17 +27,26 @@ config :logger, :default_formatter,
     :key,
     :message,
     :message_id,
+    :purged,
     :reason,
     :session_id,
     :session_row_id,
+    :selected,
     :source,
     :started,
     :status,
+    :skipped,
     :type
   ]
 
 # Use Jason for JSON parsing in Phoenix
 config :phoenix, :json_library, Jason
+
+config :wajadi_engine, WajadiEngine.WhatsApp.SessionCleanupScheduler,
+  enabled?: false,
+  interval_ms: :timer.hours(24),
+  batch_size: 100,
+  run_on_start?: false
 
 # Import environment specific config. This must remain at the bottom
 # of this file so it overrides the configuration defined above.
