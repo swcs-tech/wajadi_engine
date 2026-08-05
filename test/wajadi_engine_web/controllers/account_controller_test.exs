@@ -185,7 +185,7 @@ defmodule WajadiEngineWeb.AccountControllerTest do
           price: "12000.00",
           currency: "IDR",
           stock_quantity: 5,
-          availability: "available",
+          availability: "in_stock",
           sort_order: 1
         })
         |> json_response(201)

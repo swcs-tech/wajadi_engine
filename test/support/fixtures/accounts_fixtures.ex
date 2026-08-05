@@ -61,7 +61,7 @@ defmodule WajadiEngine.AccountsFixtures do
           price: "10000.00",
           currency: "IDR",
           stock_quantity: 10,
-          availability: "available",
+          availability: "in_stock",
           sort_order: 0
         },
         attrs

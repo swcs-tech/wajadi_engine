@@ -40,7 +40,7 @@ defmodule WajadiEngine.Repo.Migrations.CreateStoreProducts do
            )
 
     create constraint(:store_products, :store_products_availability_check,
-             check: "availability IN ('unknown', 'available', 'out_of_stock', 'preorder')"
+             check: "availability IN ('unknown', 'in_stock', 'out_of_stock', 'preorder')"
            )
   end
 end

@@ -63,7 +63,11 @@ defmodule WajadiEngine.StoresTest do
                Stores.upsert_personality(account, store.id, %{prompt: "Updated specialist"})
 
       assert updated.prompt == "Updated specialist"
-      assert Repo.aggregate(Personality, :count) == 1
+
+      assert Repo.aggregate(
+               from(personality in Personality, where: personality.store_id == ^store.id),
+               :count
+             ) == 1
     end
 
     test "rejects blank prompts and cross-account access" do

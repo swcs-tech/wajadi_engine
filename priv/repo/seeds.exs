@@ -10,7 +10,7 @@
 # We recommend using the bang functions (`insert!`, `update!`
 # and so on) as they will fail if something goes wrong.
 
-if Mix.env() == :dev and System.get_env("WAJADI_SEED_DEMO_DATA") == "true" do
+if Mix.env() in [:dev, :test] and System.get_env("WAJADI_SEED_DEMO_DATA") == "true" do
   alias WajadiEngine.Accounts.Account
   alias WajadiEngine.Repo
   alias WajadiEngine.Stores
@@ -63,7 +63,7 @@ if Mix.env() == :dev and System.get_env("WAJADI_SEED_DEMO_DATA") == "true" do
           price: "75000.00",
           currency: "IDR",
           stock_quantity: 10,
-          availability: "available",
+          availability: "in_stock",
           sort_order: 1
         },
         %{
@@ -73,7 +73,7 @@ if Mix.env() == :dev and System.get_env("WAJADI_SEED_DEMO_DATA") == "true" do
           price: "55000.00",
           currency: "IDR",
           stock_quantity: 8,
-          availability: "available",
+          availability: "in_stock",
           sort_order: 2
         }
       ],

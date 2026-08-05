@@ -24,22 +24,25 @@ defmodule WajadiEngine.WhatsAppTest do
     end
 
     test "database rejects duplicate normalized account email" do
-      attrs = %{email: "Owner@Example.COM"}
+      unique = System.unique_integer([:positive])
+      attrs = %{email: "Owner-#{unique}@Example.COM"}
       assert {:ok, _account} = %Account{} |> Account.create_changeset(attrs) |> Repo.insert()
 
       assert {:error, changeset} =
                %Account{}
-               |> Account.create_changeset(%{email: " owner@example.com "})
+               |> Account.create_changeset(%{email: " owner-#{unique}@example.com "})
                |> Repo.insert()
 
       assert %{email: ["has already been taken"]} = errors_on(changeset)
     end
 
     test "rejects blank account identity without inserting account rows" do
+      account_count = Repo.aggregate(Account, :count)
+
       assert {:error, changeset} = WhatsApp.create_session(" ", %{session_id: "session-1"})
 
       assert %{email: ["can't be blank"]} = errors_on(changeset)
-      assert Repo.aggregate(Account, :count) == 0
+      assert Repo.aggregate(Account, :count) == account_count
     end
   end
 
@@ -225,7 +228,9 @@ defmodule WajadiEngine.WhatsAppTest do
     test "creates a session using an owned unassigned store" do
       account =
         %Account{}
-        |> Account.create_changeset(%{email: "owner@example.com"})
+        |> Account.create_changeset(%{
+          email: "owned-store-#{System.unique_integer([:positive])}@example.com"
+        })
         |> Repo.insert!()
 
       assert {:ok, store} = Stores.create_store(account, %{name: "Existing Store"})
@@ -243,7 +248,11 @@ defmodule WajadiEngine.WhatsAppTest do
 
     test "rejects another account's store during session creation" do
       owner =
-        %Account{} |> Account.create_changeset(%{email: "owner@example.com"}) |> Repo.insert!()
+        %Account{}
+        |> Account.create_changeset(%{
+          email: "private-store-#{System.unique_integer([:positive])}@example.com"
+        })
+        |> Repo.insert!()
 
       assert {:ok, store} = Stores.create_store(owner, %{name: "Private Store"})
 

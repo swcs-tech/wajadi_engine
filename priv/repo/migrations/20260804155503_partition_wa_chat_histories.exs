@@ -12,6 +12,7 @@ defmodule WajadiEngine.Repo.Migrations.PartitionWaChatHistories do
 
   def down do
     if enabled?() do
+      remove_partman_config()
       execute("DROP TABLE IF EXISTS wa_chat_histories CASCADE")
       create_unpartitioned_chat_history_table()
       create_chat_history_indexes()
@@ -19,9 +20,17 @@ defmodule WajadiEngine.Repo.Migrations.PartitionWaChatHistories do
   end
 
   defp rebuild_partitioned_chat_history_table do
+    remove_partman_config()
     execute("DROP TABLE IF EXISTS wa_chat_histories CASCADE")
     create_partitioned_chat_history_table()
     create_chat_history_indexes()
+  end
+
+  defp remove_partman_config do
+    execute("""
+    DELETE FROM partman.part_config
+    WHERE parent_table = 'public.wa_chat_histories'
+    """)
   end
 
   defp create_partitioned_chat_history_table do
@@ -98,12 +107,14 @@ defmodule WajadiEngine.Repo.Migrations.PartitionWaChatHistories do
   end
 
   defp configure_pg_partman! do
+    execute("SET LOCAL TIME ZONE 'UTC'")
+
     execute("""
     SELECT partman.create_parent(
       p_parent_table := 'public.wa_chat_histories',
       p_control := 'inserted_at',
-      p_type := 'native',
-      p_interval := 'daily',
+      p_type := 'range',
+      p_interval := '1 day',
       p_premake := 7,
       p_start_partition := (date_trunc('day', now() AT TIME ZONE 'UTC') - interval '1 day')::date::text
     )
@@ -113,7 +124,8 @@ defmodule WajadiEngine.Repo.Migrations.PartitionWaChatHistories do
     UPDATE partman.part_config
     SET infinite_time_partitions = true,
         retention = '90 days',
-        retention_keep_table = false
+        retention_keep_table = false,
+        retention_keep_index = false
     WHERE parent_table = 'public.wa_chat_histories'
     """)
   end

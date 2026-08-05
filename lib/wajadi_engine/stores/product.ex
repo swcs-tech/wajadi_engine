@@ -5,7 +5,7 @@ defmodule WajadiEngine.Stores.Product do
 
   alias WajadiEngine.Stores.Store
 
-  @availabilities ~w(unknown available out_of_stock preorder)
+  @availabilities ~w(unknown in_stock out_of_stock preorder)
   @currencies ~w(IDR USD EUR SGD MYR)
 
   @type availability :: String.t()
